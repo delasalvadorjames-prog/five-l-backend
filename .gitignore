@@ -1,0 +1,24 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
