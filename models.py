@@ -73,7 +73,13 @@ def build_mysql_url() -> str:
 
 
 MYSQL_URL = build_mysql_url()
-engine = create_engine(MYSQL_URL, pool_pre_ping=True, pool_recycle=3600)
+engine = create_engine(
+    MYSQL_URL,
+    pool_pre_ping=True,
+    pool_recycle=280,      # I-recycle kada 280 segundo (< 300s timeout ng MySQL)
+    pool_size=5,           # Maximum na connections sa pool
+    max_overflow=10,       # Extra connections kung kailangan
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
