@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any
 
 # API Base URL
-BASE_URL = "http://localhost:8000/api"
+BASE_URL = "https://five-l-backend.onrender.com/api"
 
 def print_header(title: str):
     """Print a formatted header"""
