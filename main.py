@@ -912,7 +912,9 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
             subtype=MessageType.plain,
         )
         try:
-            MAIL_CLIENT.send_message(message)
+            # FastMail.send_message is async, while this endpoint is sync.
+            # Run the coroutine explicitly so the message is actually sent.
+            asyncio.run(MAIL_CLIENT.send_message(message))
             return
         except Exception as exc:
             if EMAIL_DEV_FALLBACK:
