@@ -60,10 +60,11 @@ async def lifespan(app: FastAPI):
             try:
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
+                    conn.commit()
                 print("Database keep-alive: OK")
             except Exception as exc:
                 print(f"Database keep-alive error: {exc}")
-            await asyncio.sleep(240)  # Every 4 minutes
+            await asyncio.sleep(180)  # Every 3 minutes
 
     task = asyncio.create_task(keep_alive())
     try:
@@ -71,7 +72,6 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown: cancel the keep-alive task.
         task.cancel()
-
 
 # -------------------
 # Base setup
