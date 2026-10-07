@@ -15,7 +15,6 @@ from typing import Dict, List, Optional, Union
 from urllib.parse import quote_plus, urlparse
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, Boolean, ForeignKey, func, Index, UniqueConstraint, text
-# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, and_
@@ -28,7 +27,7 @@ from sqlalchemy.sql import func
 
 try:
     from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
-except Exception:  # pragma: no cover - optional dependency guard
+except Exception:
     ConnectionConfig = None
     FastMail = None
     MessageSchema = None
@@ -39,7 +38,6 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ConfigDict
 from email_validator import EmailNotValidError, validate_email
 
-# Import ML routes
 try:
     from ml_routes import router as ml_router
     ML_ENABLED = True
@@ -52,7 +50,6 @@ except ImportError:
 # -------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run the existing database initialization during application startup.
     on_startup()
 
     async def keep_alive():
@@ -64,14 +61,17 @@ async def lifespan(app: FastAPI):
                 print("Database keep-alive: OK")
             except Exception as exc:
                 print(f"Database keep-alive error: {exc}")
-            await asyncio.sleep(180)  # Every 3 minutes
+            await asyncio.sleep(180)
 
     task = asyncio.create_task(keep_alive())
     try:
         yield
     finally:
-        # Shutdown: cancel the keep-alive task.
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 # -------------------
 # Base setup
@@ -91,6 +91,8 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "https://fivelpharmacy.com",
+        "https://www.fivelpharmacy.com",
     ],
     allow_origin_regex=r"https?://.*",
     allow_credentials=True,
@@ -120,7 +122,6 @@ def read_int_env(name: str, default: int) -> int:
 def normalize_smtp_password(host: str, password: str) -> str:
     password = (password or "").strip()
     if host.strip().lower() in {"smtp.gmail.com", "smtp-relay.gmail.com"}:
-        # Google app passwords are often copied as grouped text with spaces.
         return "".join(password.split())
     return password
 
@@ -214,14 +215,10 @@ JWT_SECRET = os.getenv("JWT_SECRET", "five-l-dev-secret-change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_HOURS = read_int_env("JWT_EXPIRES_HOURS", 2)
 
-# DB Reset on Startup
 RESET_DB_ON_STARTUP = read_bool_env("FIVE_L_RESET_DB", False)
-# Demo/sample records must never be inserted into a production database by
-# default. Enable this explicitly only for a demo environment.
 SEED_DEMO_DATA = read_bool_env("FIVE_L_SEED_DEMO_DATA", False)
 RESET_CODE_EXPIRY_MINUTES = read_int_env("RESET_CODE_EXPIRY_MINUTES", 15)
 
-# Security — allowed email allowlist
 _raw_allowed = os.getenv("ALLOWED_EMAILS", "delasalvadorjames@gmail.com,jeremiassalvador@five-l")
 ALLOWED_EMAILS: set = {e.strip().lower() for e in _raw_allowed.split(",") if e.strip()}
 DEMO_ADMIN_EMAIL = "delasalvadorjames@gmail.com"
@@ -236,12 +233,10 @@ def data_owner_id(user: object) -> Optional[int]:
         return getattr(user, "created_by_admin", None) or getattr(user, "id", None)
     return getattr(user, "id", None)
 
-# Brute-force protection config
 MAX_LOGIN_ATTEMPTS = read_int_env("MAX_LOGIN_ATTEMPTS", 3)
 LOCKOUT_MINUTES = read_int_env("LOCKOUT_MINUTES", 5)
 MAX_ADMIN_ACCOUNTS = 2
 
-# SMTP / Email reset configuration
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = read_int_env("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
@@ -268,7 +263,6 @@ if SMTP_HOST and ConnectionConfig is not None:
     )
     MAIL_CLIENT = FastMail(MAIL_CONFIG)
 
-# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # -------------------
@@ -328,7 +322,6 @@ class Medicine(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     is_new_arrival = Column(Boolean, default=False)
 
-    # New fields
     product_code = Column(String(50), unique=True, index=True, nullable=True)
     medicine_name = Column(String(200), index=True, nullable=True)
     classification = Column(String(50), nullable=False, server_default='Generic')
@@ -375,51 +368,20 @@ class MedicineSupply(Base):
     medicine = relationship("Medicine", back_populates="supplies")
 
 class PriceHistory(Base):
-
     __tablename__ = 'price_history'
-
     id = Column(Integer, primary_key=True, autoincrement=True)
-
-    inventory_id = Column(
-
-        Integer,
-
-        ForeignKey('medicine_supplies.id', ondelete='CASCADE'),
-
-        nullable=False
-
-    )
-
+    inventory_id = Column(Integer, ForeignKey('medicine_supplies.id', ondelete='CASCADE'), nullable=False)
     old_price = Column(Float, nullable=False)
-
     new_price = Column(Float, nullable=False)
-
     updated_by = Column(String(100), nullable=True)
-
-    # NEW FIELDS
-
-    status = Column(
-
-        Enum('PENDING', 'APPROVED', 'REJECTED'),
-
-        default='PENDING',
-
-        nullable=False
-
-    )
-
+    status = Column(Enum('PENDING', 'APPROVED', 'REJECTED'), default='PENDING', nullable=False)
     approved_by = Column(String(100), nullable=True)
-
     approved_at = Column(DateTime, nullable=True)
-
     reason = Column(Text, nullable=True)
-
     adjustment_type = Column(String(32), nullable=True)
     old_quantity = Column(Integer, nullable=True)
     new_quantity = Column(Integer, nullable=True)
-
     remarks = Column(Text, nullable=True)
-
     created_at = Column(DateTime, server_default=func.now())
 
 class SalesTransaction(Base):
@@ -440,7 +402,6 @@ class StockMovement(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 class ActiveAdminSession(Base):
-    """Stores the single active JWT token per admin. Only one session allowed at a time."""
     __tablename__ = 'active_admin_sessions'
     id = Column(Integer, primary_key=True, autoincrement=True)
     email = Column(String(255), unique=True, index=True)
@@ -449,7 +410,6 @@ class ActiveAdminSession(Base):
     expires_at = Column(DateTime)
 
 class LoginAttempt(Base):
-    """Tracks failed login attempts for brute-force protection."""
     __tablename__ = 'login_attempts'
     id = Column(Integer, primary_key=True, autoincrement=True)
     email = Column(String(255), index=True)
@@ -459,7 +419,6 @@ class LoginAttempt(Base):
     last_attempt_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class AuditLog(Base):
-    """Records all significant security events."""
     __tablename__ = 'audit_logs'
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_type = Column(String(64))
@@ -471,7 +430,7 @@ class AuditLog(Base):
 class MedicineAuditLog(Base):
     __tablename__ = 'medicine_audit_logs'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    action_type = Column(String(64), index=True) # medicine added, medicine updated, medicine deleted, stock changes, expired medicines, low stock alerts
+    action_type = Column(String(64), index=True)
     medicine_name = Column(String(200), index=True)
     performed_by = Column(String(255))
     role = Column(String(20))
@@ -482,11 +441,10 @@ class MedicineAuditLog(Base):
 class AdminAlert(Base):
     __tablename__ = 'admin_alerts'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    alert_type = Column(String(64), index=True) # EXPIRING, LOW_STOCK, SUSPICIOUS_STOCK, MEDICINE_DELETED, FAILED_LOGIN
+    alert_type = Column(String(64), index=True)
     message = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
     is_read = Column(Boolean, default=False)
-
 
 
 # -------------------
@@ -503,8 +461,9 @@ engine = create_engine(
         "connect_timeout": 10,
         "read_timeout": 30,
         "write_timeout": 30,
+        "init_command": "SET SESSION wait_timeout=28800, SESSION interactive_timeout=28800",
     },
-)       # Extra connections kung kailangan
+)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -513,7 +472,10 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 # -------------------
 # Pydantic Models
@@ -526,7 +488,6 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     full_name: str
     email: str
@@ -536,7 +497,6 @@ class UserResponse(BaseModel):
 
 class MedicineSupplyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     medicine_id: int
     batch_number: str
@@ -551,7 +511,6 @@ class MedicineSupplyResponse(BaseModel):
 
 class PriceHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     inventory_id: int
     old_price: float
@@ -575,7 +534,7 @@ class MedicineSupplyCreate(BaseModel):
     batch_number: Optional[str] = None
     quantity: int
     supplier: Optional[str] = None
-    expiry_date: str # YYYY-MM-DD
+    expiry_date: str
     received_date: Optional[str] = None
     unit_cost: Optional[float] = 0.0
     selling_price: Optional[float] = 0.0
@@ -600,8 +559,6 @@ class MedicineCreate(BaseModel):
     unit_price: Optional[float] = 0.0
     supplier: Optional[str] = None
     assigned_staff: Optional[int] = None
-
-    # New fields
     medicine_name: Optional[str] = None
     classification: Optional[str] = "Generic"
     dosage_form: Optional[str] = "Tablet"
@@ -613,8 +570,6 @@ class MedicineCreate(BaseModel):
     purchase_unit: Optional[str] = None
     conversion_factor: Optional[int] = 1
     category: Optional[str] = None
-    
-    # Opening batch / supply fields
     batch_number: Optional[str] = "BATCH-INIT"
     quantity: Optional[int] = 0
     expiry_date: Optional[str] = None
@@ -633,8 +588,6 @@ class MedicineUpdate(BaseModel):
     supplier: Optional[str] = None
     is_new_arrival: Optional[bool] = False
     assigned_staff: Optional[int] = None
-    
-    # New fields
     medicine_name: Optional[str] = None
     classification: Optional[str] = None
     dosage_form: Optional[str] = None
@@ -648,7 +601,6 @@ class MedicineUpdate(BaseModel):
 
 class MedicineResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     name: str
     category: str
@@ -665,8 +617,6 @@ class MedicineResponse(BaseModel):
     last_restocked_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     is_new_arrival: bool = False
-    
-    # New fields
     product_code: str
     medicine_name: str
     classification: str
@@ -685,7 +635,6 @@ class MedicineResponse(BaseModel):
 
 class SalesTransactionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     medicine_id: int
     quantity: int
@@ -721,7 +670,6 @@ class LoginOTPVerifyRequest(BaseModel):
 
 class StaffResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
     identifier: str
     full_name: str
@@ -740,7 +688,6 @@ class StaffPermissionsUpdate(BaseModel):
     can_view_reports: bool
     can_adjust_inventory: bool
     can_approve_voids: bool
-
 
 class StaffPasswordReset(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128)
@@ -795,18 +742,10 @@ class PredictResponse(BaseModel):
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
-
 def has_admin_account(db: Session) -> bool:
-    """Return whether a real administrator exists.
-
-    The demo account keeps the admin role so it can exercise the admin UI,
-    but it must not be treated as one of the two real admin accounts.
-    """
     return count_admin_accounts(db) > 0
 
-
 def count_admin_accounts(db: Session) -> int:
-    """Count real administrators; the demo account does not consume a slot."""
     return (
         db.query(User)
         .filter(
@@ -815,7 +754,6 @@ def count_admin_accounts(db: Session) -> int:
         )
         .count()
     )
-
 
 def is_valid_email_address(email: str) -> bool:
     normalized = normalize_email(email)
@@ -827,7 +765,6 @@ def is_valid_email_address(email: str) -> bool:
     except EmailNotValidError:
         return False
 
-
 def validate_signup_payload(full_name: str, email: str, password: str, confirm_password: Optional[str]) -> None:
     if not (full_name or "").strip():
         raise HTTPException(status_code=400, detail="Full name is required")
@@ -837,7 +774,6 @@ def validate_signup_payload(full_name: str, email: str, password: str, confirm_p
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
     if (confirm_password or password) != password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
-
 
 def normalize_user_role(role: Optional[str]) -> str:
     normalized = (role or "staff").strip().lower()
@@ -873,19 +809,16 @@ def build_auth_response(user: User) -> LoginResponse:
     )
 
 def build_auth_response_with_session(user: User, db: Session) -> LoginResponse:
-    """Builds auth response AND persists a single active session for admins and staff."""
     role = normalize_user_role(user.role)
     assigned_category = (user.assigned_category or "").strip() or None
     access_token = create_access_token(data={"sub": user.email, "role": role, "assigned_category": assigned_category})
-    
     if role == "admin":
         store_active_session(user.email, access_token, db)
-        write_audit_log(db, "SESSION_CREATED", user.email, detail=f"New admin session issued")
+        write_audit_log(db, "SESSION_CREATED", user.email, detail="New admin session issued")
     else:
         user.active_token = access_token
         db.commit()
-        write_audit_log(db, "SESSION_CREATED", user.email, detail=f"New staff session issued")
-
+        write_audit_log(db, "SESSION_CREATED", user.email, detail="New staff session issued")
     return LoginResponse(
         access_token=access_token,
         token_type="bearer",
@@ -942,8 +875,6 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
             subtype=MessageType.plain,
         )
         try:
-            # FastMail.send_message is async, while this endpoint is sync.
-            # Run the coroutine explicitly so the message is actually sent.
             asyncio.run(MAIL_CLIENT.send_message(message))
             return
         except Exception as exc:
@@ -999,14 +930,9 @@ def send_login_otp_email(recipient_email: str, full_name: str, otp_code: str) ->
     )
     send_mail_message(recipient_email, "Five L Pharmacy Login Verification Code", body)
 
-# --------------------------------
-# Security utilities
-# --------------------------------
-
 UNAUTHORIZED_DETAIL = "Unauthorized account access"
 
 def check_allowed_email(email: str) -> None:
-    """Raises 403 immediately if email is not in the allowlist."""
     if email.strip().lower() not in ALLOWED_EMAILS:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1015,7 +941,6 @@ def check_allowed_email(email: str) -> None:
 
 def write_audit_log(db: Session, event_type: str, email: Optional[str] = None,
                     ip_address: Optional[str] = None, detail: Optional[str] = None) -> None:
-    """Writes a row to audit_logs. Never raises — logging failures are silent."""
     try:
         log = AuditLog(event_type=event_type, email=email, ip_address=ip_address, detail=detail)
         db.add(log)
@@ -1055,7 +980,6 @@ def create_admin_alert(db: Session, alert_type: str, message: str) -> None:
 
 
 def check_rate_limit(email: str, ip: str, db: Session) -> None:
-    """Raises 429 if the email/IP is locked out due to too many failed attempts."""
     now = datetime.now()
     record = db.query(LoginAttempt).filter(LoginAttempt.email == email).first()
     if record and record.locked_until and record.locked_until > now:
@@ -1067,7 +991,6 @@ def check_rate_limit(email: str, ip: str, db: Session) -> None:
         )
 
 def record_attempt(email: str, ip: str, success: bool, db: Session) -> None:
-    """Records a login attempt and applies lockout if threshold exceeded."""
     now = datetime.now()
     record = db.query(LoginAttempt).filter(LoginAttempt.email == email).first()
 
@@ -1103,7 +1026,6 @@ def record_attempt(email: str, ip: str, success: bool, db: Session) -> None:
 
 
 def store_active_session(email: str, token: str, db: Session) -> None:
-    """Persists the single valid JWT for an admin, invalidating any previous session."""
     expires_at = datetime.now() + timedelta(hours=JWT_EXPIRES_HOURS)
     existing = db.query(ActiveAdminSession).filter(ActiveAdminSession.email == email).first()
     if existing:
@@ -1116,21 +1038,16 @@ def store_active_session(email: str, token: str, db: Session) -> None:
     db.commit()
 
 def invalidate_admin_session(email: str, db: Session) -> None:
-    """Removes the active admin session (logout or forced)."""
     db.query(ActiveAdminSession).filter(ActiveAdminSession.email == email).delete(synchronize_session=False)
     db.commit()
     write_audit_log(db, "SESSION_INVALIDATED", email, detail="Admin session invalidated")
 
-# -------------------
-# Auth dependency
-# -------------------
 async def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    # 1. Parse the Bearer token
     try:
         scheme, token = (authorization or "").split()
         if scheme.lower() != "bearer":
@@ -1138,7 +1055,6 @@ async def get_current_user(authorization: str = Header(None), db: Session = Depe
     except Exception:
         raise credentials_exception
 
-    # 2. Verify JWT signature and expiration
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         email: str = payload.get("sub")
@@ -1147,14 +1063,11 @@ async def get_current_user(authorization: str = Header(None), db: Session = Depe
     except JWTError:
         raise credentials_exception
 
-    # 3. Load user from DB
     user = db.query(User).filter(User.email == email).first()
     if not user:
         raise credentials_exception
 
-    # 4. Check role-based constraints
     if normalize_user_role(user.role) == "admin":
-        # Verify active session for admin
         active = db.query(ActiveAdminSession).filter(ActiveAdminSession.email == email).first()
         if not active or active.token != token:
             write_audit_log(db, "STALE_SESSION", email, detail="Admin token no longer active — newer session exists")
@@ -1171,7 +1084,6 @@ async def get_current_user(authorization: str = Header(None), db: Session = Depe
                 headers={"WWW-Authenticate": "Bearer"},
             )
     else:
-        # Verify active session for staff
         if getattr(user, "active_token", None) and user.active_token != token:
             write_audit_log(db, "STALE_SESSION", email, detail="Staff token no longer active — newer session exists")
             raise HTTPException(
@@ -1180,7 +1092,6 @@ async def get_current_user(authorization: str = Header(None), db: Session = Depe
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    # 5. Check if account status is active
     status_val = getattr(user, "account_status", "active") or "active"
     if status_val != "active":
         write_audit_log(db, "BLOCKED_ACCESS", email, detail=f"Access blocked. Account is {status_val}")
@@ -1198,7 +1109,6 @@ def require_admin_user(current_user: User = Depends(get_current_user)) -> User:
 
 @app.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    """Returns the authenticated user's profile including their real role."""
     return {
         "id": current_user.id,
         "email": current_user.email,
@@ -1226,7 +1136,6 @@ def init_database():
     ensure_transaction_bir_columns()
     seed_inventory_alert_configs()
 
-
 DEFAULT_INVENTORY_ALERT_CONFIGS = (
     ('Tablet', 20, 30),
     ('Capsule', 20, 30),
@@ -1241,7 +1150,6 @@ DEFAULT_INVENTORY_ALERT_CONFIGS = (
 
 
 def seed_inventory_alert_configs():
-    """Add default dosage-form rules without overwriting existing admin values."""
     with engine.begin() as conn:
         for dosage_form, low_stock_threshold, expiry_alert_days in DEFAULT_INVENTORY_ALERT_CONFIGS:
             conn.execute(text("""
@@ -1257,12 +1165,6 @@ def seed_inventory_alert_configs():
 
 
 def ensure_inventory_schema_columns():
-    """Apply additive inventory migrations before any ORM query runs.
-
-    ``create_all`` does not alter tables that already exist, so older
-    installations can be missing columns added to the ORM models later.
-    These migrations are intentionally additive and safe to run repeatedly.
-    """
     migrations = {
         "medicines": {
             "is_archived": "BOOLEAN NOT NULL DEFAULT FALSE",
@@ -1271,10 +1173,6 @@ def ensure_inventory_schema_columns():
             "received_date": "DATE NULL",
             "is_archived": "BOOLEAN NOT NULL DEFAULT FALSE",
         },
-        # Older installations created this table from schema_fifo.sql with
-        # ``batch_reference`` instead of ``batch_number``.  ``CREATE TABLE
-        # IF NOT EXISTS`` cannot add the fields introduced by the current FIFO
-        # implementation, so migrate them before the medicine sync below.
         "inventory_batches": {
             "batch_number": "VARCHAR(100) NULL",
             "cost_per_unit": "DECIMAL(10, 2) NULL DEFAULT 0.00",
@@ -1297,9 +1195,6 @@ def ensure_inventory_schema_columns():
                     print(f"[INFO] Adding missing column {table}.{column}")
                     conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}"))
 
-        # Some older databases already have is_removed, but without a default.
-        # The startup sync inserts batches using raw SQL, so repair that schema
-        # drift instead of relying only on the ORM default.
         is_removed_exists = conn.execute(text(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_schema = DATABASE() AND table_name = 'inventory_batches' "
@@ -1311,8 +1206,6 @@ def ensure_inventory_schema_columns():
                 "MODIFY COLUMN is_removed BOOLEAN NOT NULL DEFAULT FALSE"
             ))
 
-        # Preserve batch identifiers from the legacy FIFO schema.  The fallback
-        # includes the row id so every existing batch gets a stable identifier.
         batch_number_exists = conn.execute(text(
             "SELECT COUNT(*) FROM information_schema.columns "
             "WHERE table_schema = DATABASE() AND table_name = 'inventory_batches' "
@@ -1331,10 +1224,7 @@ def ensure_inventory_schema_columns():
             ))
 
 def ensure_transaction_bir_columns():
-    """Add transaction fields needed by POS, BIR reporting, and history."""
     columns = {
-        # These fields were added to the ORM for POS cash/change tracking, but
-        # older databases may have been created before they existed.
         "cash_received": "DECIMAL(12,2) NULL",
         "change_amount": "DECIMAL(12,2) NULL",
         "customer_id": "INT NULL",
@@ -1716,7 +1606,6 @@ def ensure_user_role_column():
                     "notes": f"Synced from medicine_supplies::{supply_id}",
                 })
 
-        # Ensure the actual user schema tables are present even if the DB was created earlier with a different structure.
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS categories (
                 category_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1743,11 +1632,9 @@ def ensure_user_role_column():
                 forecast_month DATE NULL,
                 predicted_demand FLOAT NULL,
                 algorithm VARCHAR(80) NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP            )
         """))
 
-        # Ensure price_history schema matches the app model.
         price_history_exists = conn.execute(text("SHOW TABLES LIKE 'price_history'")).first()
         if not price_history_exists:
             conn.execute(text("""
@@ -1767,7 +1654,7 @@ def ensure_user_role_column():
                 )
             """))
         else:
-            approved_by_col = conn.execute(text("SHOW COLUMNS FROM price_history LIKE 'approved_by'")) .first()
+            approved_by_col = conn.execute(text("SHOW COLUMNS FROM price_history LIKE 'approved_by'")).first()
             if approved_by_col is None:
                 conn.execute(text("ALTER TABLE price_history ADD COLUMN approved_by VARCHAR(255) NULL"))
             else:
@@ -1775,7 +1662,6 @@ def ensure_user_role_column():
                 if "INT" in column_type:
                     conn.execute(text("ALTER TABLE price_history MODIFY COLUMN approved_by VARCHAR(255) NULL"))
 
-        # Migrate existing medicines data to supplies and generate codes
         medicines = conn.execute(text("SELECT id, name, stock, expiry, unit_price, supplier, product_code, medicine_name FROM medicines")).all()
         for idx, med in enumerate(medicines, start=1):
             med_id = med[0]
@@ -1786,7 +1672,7 @@ def ensure_user_role_column():
             supplier = med[5]
             product_code = med[6]
             med_name = med[7]
-            
+
             if not product_code:
                 current_year = datetime.now().year
                 prefix = f"PRD-{current_year}-"
@@ -1795,18 +1681,18 @@ def ensure_user_role_column():
                     text("UPDATE medicines SET product_code = :pc WHERE id = :id"),
                     {"pc": formatted_code, "id": med_id}
                 )
-                
+
             if not med_name:
                 conn.execute(
                     text("UPDATE medicines SET medicine_name = :mn WHERE id = :id"),
                     {"mn": name, "id": med_id}
                 )
-                
+
             supplies_count = conn.execute(
                 text("SELECT COUNT(*) FROM medicine_supplies WHERE medicine_id = :med_id"),
                 {"med_id": med_id}
             ).scalar()
-            
+
             if supplies_count == 0:
                 conn.execute(
                     text("""
@@ -1823,10 +1709,9 @@ def ensure_user_role_column():
                         "price": unit_price
                     }
                 )
-        
+
         conn.execute(text("UPDATE users SET role = 'staff' WHERE role IS NULL OR role = ''"))
 
-        # Ensure new security tables exist (created by Base.metadata.create_all but added here as safety)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS active_admin_sessions (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1861,9 +1746,6 @@ def ensure_user_role_column():
             )
         """))
 
-        # -------------------------------------------------------------
-        # Five L pharmacy system monitoring, tracking, & audit updates
-        # -------------------------------------------------------------
         updated_by_column = conn.execute(text("SHOW COLUMNS FROM medicines LIKE 'updated_by'")).first()
         if not updated_by_column:
             conn.execute(text("ALTER TABLE medicines ADD COLUMN updated_by INT NULL, ADD CONSTRAINT fk_updated_by FOREIGN KEY (updated_by) REFERENCES users(id)"))
@@ -1909,7 +1791,6 @@ def seed_data():
 
     db = SessionLocal()
     try:
-        # Demo data is opt-in. The first admin account is created through signup.
         if db.query(Medicine).count() == 0:
             medicines = [
                 Medicine(name="Amoxicillin 500mg", category="Antibiotic", stock=44, reorder_level=50, expiry=datetime.strptime("2026-04-10","%Y-%m-%d").date(), avg_daily_sales=6, unit_price=18.0),
@@ -1921,7 +1802,10 @@ def seed_data():
             db.add_all(medicines)
         db.commit()
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 def on_startup():
     try:
@@ -1930,7 +1814,6 @@ def on_startup():
         print(f"[INFO] Connected to DB: {MYSQL_URL}")
         init_database()
         seed_data()
-        # Ensure 'received_date' column exists on medicine_supplies
         try:
             with engine.connect() as conn:
                 check_sql = text("SELECT COUNT(*) as cnt FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'medicine_supplies' AND column_name = 'received_date'")
@@ -1965,17 +1848,11 @@ def on_startup():
         app.state.startup_error = f"MySQL connection failed: {exc}"
         print(f"[ERROR] {app.state.startup_error}")
 
-# -------------------
-# Routes
-# -------------------
 @app.get("/health")
 def health_check():
-    # Mabilis na response — hindi na kailangan ng database query
-    # Ang /health ay para lang i-check kung buhay ang app
     return {"status": "ok"}
 
 def format_medicine_name(base_name: str, dosage_form: str = "Tablet", strength: Optional[str] = None, volume: Optional[str] = None) -> str:
-    """Build a variant label without repeating a suffix already in the name."""
     base = re.sub(r"\s+", " ", (base_name or "").strip()).strip(" -/")
     if not base:
         return "Untitled Medicine"
@@ -1996,7 +1873,6 @@ def format_medicine_name(base_name: str, dosage_form: str = "Tablet", strength: 
 
 
 def get_inventory_alert_config(db: Session, dosage_form: Optional[str]):
-    """Return an active dosage-form rule, or None so callers can use globals."""
     normalized = (dosage_form or '').strip()
     if not normalized:
         return None
@@ -2015,23 +1891,18 @@ def get_inventory_alert_config_map(db: Session):
 
 
 def populate_medicine_computed_fields(med, new_arrival_ids):
-    # Supplies list
     supplies = med.supplies or []
     today = date.today()
-    # Available stock excludes expired batches and batches within 30 days of expiry.
-    # These batches remain visible in supply history and still drive expiry warnings.
     med.stock = sum(s.quantity for s in supplies if not s.is_archived and s.quantity > 0 and (not s.expiry_date or s.expiry_date > today + timedelta(days=30)))
-    
-    # Expiry: nearest expiry date (earliest)
+
     active_expiry_dates = [s.expiry_date for s in supplies if not s.is_archived and s.quantity > 0]
     if active_expiry_dates:
         med.expiry = min(active_expiry_dates)
     elif supplies:
         med.expiry = min(s.expiry_date for s in supplies)
     else:
-        med.expiry = date(2027, 12, 31) # sensible default
-        
-    # Latest added supply for pricing and supplier
+        med.expiry = date(2027, 12, 31)
+
     if supplies:
         latest_supply = sorted(supplies, key=lambda s: s.id, reverse=True)[0]
         med.unit_price = latest_supply.selling_price
@@ -2039,12 +1910,10 @@ def populate_medicine_computed_fields(med, new_arrival_ids):
     else:
         med.unit_price = med.unit_price or 0.0
         med.supplier = med.supplier or None
-        
-    # Format name in one place only. medicine_name remains the canonical base.
+
     med.name = format_medicine_name(med.medicine_name or med.name or "", med.dosage_form or "Tablet", med.strength, med.volume)
-    
+
     med.is_new_arrival = med.id in new_arrival_ids
-    # Ensure fields required by response model are non-null strings
     med.product_code = med.product_code or ""
     med.medicine_name = med.medicine_name or med.name or ""
     med.classification = med.classification or ""
@@ -2071,8 +1940,6 @@ def list_inventory(db: Session = Depends(get_db), current_user: User = Depends(g
     for med in medicines:
         populate_medicine_computed_fields(med, new_arrival_ids)
         config = config_map.get((med.dosage_form or '').strip().casefold())
-        # These response-only values let the existing frontend alert logic use
-        # dosage-form rules while retaining global settings as its fallback.
         med.low_stock_threshold = config.low_stock_threshold if config else None
         med.expiry_alert_days = config.expiry_alert_days if config else None
     return medicines
@@ -2173,7 +2040,7 @@ def generate_product_code(db: Session) -> str:
     max_code = db.query(Medicine.product_code).filter(
         Medicine.product_code.like(f"{prefix}%")
     ).order_by(Medicine.product_code.desc()).first()
-    
+
     if max_code and max_code[0]:
         try:
             last_seq = int(max_code[0].split("-")[-1])
@@ -2182,7 +2049,7 @@ def generate_product_code(db: Session) -> str:
             new_seq = 1
     else:
         new_seq = 1
-        
+
     return f"{prefix}{new_seq:04d}"
 
 
@@ -2328,11 +2195,11 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     base_unit = medicine.base_unit or "pcs"
     purchase_unit = medicine.purchase_unit or medicine.unit_type or "pcs"
     conversion_factor = max(1, int(medicine.conversion_factor or 1))
-    
+
     prod_code = generate_product_code(db)
-    
+
     formatted_name = format_medicine_name(med_name, dosage_form, strength, volume)
-    
+
     new_med = Medicine(
         name=formatted_name,
         category=category,
@@ -2354,21 +2221,21 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         purchase_unit=purchase_unit,
         conversion_factor=conversion_factor
     )
-    
+
     db.add(new_med)
     db.commit()
     db.refresh(new_med)
-    
+
     qty = medicine.quantity if medicine.quantity is not None else medicine.stock
     exp_str = medicine.expiry_date or medicine.expiry
-    
+
     expiry_date = date(2027, 12, 31)
     if exp_str:
         try:
             expiry_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
         except ValueError:
             pass
-            
+
     selling_price = medicine.selling_price if medicine.selling_price > 0 else (medicine.unit_price or 0.0)
     unit_cost = medicine.unit_cost if medicine.unit_cost > 0 else (selling_price * 0.7)
     supplier = medicine.supplier
@@ -2380,7 +2247,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
             received_date = datetime.strptime(received_str, "%Y-%m-%d").date()
         except ValueError:
             received_date = None
-    
+
     new_supply = MedicineSupply(
         medicine_id=new_med.id,
         batch_number=batch_num,
@@ -2394,27 +2261,23 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     db.add(new_supply)
     db.commit()
 
-    # Keep the FIFO/POS tables in sync with every medicine created from the
-    # Inventory screen. Previously only restocks were synced, so newly added
-    # medicines existed in `medicines` but were missing from `products`.
     sync_inventory_batch_for_supply(db, new_med, new_supply)
     db.commit()
-    
+
     new_val_str = f"Product Code: {prod_code}, Name: {formatted_name}, Category: {category}, Initial Stock: {qty}, Expiry: {expiry_date}"
     write_medicine_audit_log(
-        db, 
-        "medicine added", 
-        formatted_name, 
-        current_user.email, 
-        current_user.role, 
-        old_value=None, 
+        db,
+        "medicine added",
+        formatted_name,
+        current_user.email,
+        current_user.role,
+        old_value=None,
         new_value=new_val_str
     )
-    
+
     if qty > 0:
-        # sync_inventory_batch_for_supply already records this stock movement.
         new_med.is_new_arrival = True
-        
+
     alert_config = get_inventory_alert_config(db, new_med.dosage_form)
     low_stock_threshold = alert_config.low_stock_threshold if alert_config else (new_med.reorder_level or 10)
     expiry_alert_days = alert_config.expiry_alert_days if alert_config else 60
@@ -2423,7 +2286,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         msg = f"Low stock alert: {new_med.name} was added with stock {qty}"
         create_admin_alert(db, "LOW_STOCK", msg)
         write_medicine_audit_log(db, "low stock alerts", new_med.name, current_user.email, current_user.role, old_value=None, new_value=f"Stock: {qty}")
-        
+
     today = datetime.now().date()
     if expiry_date < today:
         msg = f"Expired medicine added: {new_med.name} (Expired on {expiry_date})"
@@ -2432,7 +2295,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     elif expiry_date <= today + timedelta(days=expiry_alert_days):
         msg = f"Medicine nearing expiration: {new_med.name} (Expires on {expiry_date})"
         create_admin_alert(db, "EXPIRING", msg)
-        
+
     db.refresh(new_med)
     populate_medicine_computed_fields(new_med, {new_med.id} if new_med.is_new_arrival else set())
     return new_med
@@ -2446,8 +2309,7 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
     med = query.first()
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
-    
-    # 10. Prevent staff from editing records that they are not assigned or didn't add
+
     if current_user.role != "admin":
         assigned_categories = (current_user.assigned_category or "").split(",")
         assigned_categories = [c.strip().lower() for c in assigned_categories if c.strip()]
@@ -2468,16 +2330,14 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
     changes_new = []
 
     med.updated_by = current_user.id
-    
+
     diff = 0
-    
+
     latest_supply = sorted(med.supplies, key=lambda s: s.id, reverse=True)[0] if med.supplies else None
 
     pending_stock_request = False
     pending_stock_target = None
 
-    # Staff may edit permitted medicine metadata, but stock changes must go
-    # through the same pending request/review flow as price updates.
     if (
         normalize_user_role(getattr(current_user, 'role', None)) != 'admin'
         and updates.stock is not None
@@ -2510,7 +2370,6 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
         elif field == "stock" and value is not None:
             if value != old_stock:
                 if pending_stock_request:
-                    # Keep the live stock unchanged until admin approval.
                     continue
                 changes_old.append(f"Stock: {old_stock}")
                 changes_new.append(f"Stock: {value}")
@@ -2522,7 +2381,6 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
                 changes_old.append(f"Price: ₱{old_price}")
                 changes_new.append(f"Price: ₱{value}")
                 if latest_supply:
-                    # If staff submits this change, create a PENDING price history request
                     if normalize_user_role(getattr(current_user, 'role', None)) != 'admin':
                         ph = PriceHistory(
                             inventory_id=latest_supply.id,
@@ -2613,19 +2471,19 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
 
     if updates.stock is not None and updates.stock != old_stock and not pending_stock_request:
         write_medicine_audit_log(
-            db, 
-            "stock changes", 
-            med.name, 
-            current_user.email, 
-            current_user.role, 
-            old_value=f"Stock: {old_stock}", 
+            db,
+            "stock changes",
+            med.name,
+            current_user.email,
+            current_user.role,
+            old_value=f"Stock: {old_stock}",
             new_value=f"Stock: {med.stock}"
         )
 
         if abs(diff) > 50:
             msg = f"Suspicious stock change for {med.name} by {current_user.email} ({current_user.role}): stock changed from {old_stock} to {med.stock} (diff: {diff})"
             create_admin_alert(db, "SUSPICIOUS_STOCK", msg)
-        
+
         if med.stock < 0:
             msg = f"Suspicious stock edit for {med.name}: Stock set to negative count ({med.stock}) by {current_user.email}"
             create_admin_alert(db, "SUSPICIOUS_STOCK", msg)
@@ -2636,12 +2494,12 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
 
     if changes_old:
         write_medicine_audit_log(
-            db, 
-            "medicine updated", 
-            med.name, 
-            current_user.email, 
-            current_user.role, 
-            old_value=", ".join(changes_old), 
+            db,
+            "medicine updated",
+            med.name,
+            current_user.email,
+            current_user.role,
+            old_value=", ".join(changes_old),
             new_value=", ".join(changes_new)
         )
 
@@ -2665,7 +2523,7 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
 
     seven_days_ago = datetime.now() - timedelta(days=7)
     med.is_new_arrival = bool(med.created_at and med.created_at >= seven_days_ago)
-    
+
     return med
 
 @app.get("/medicines/{medicine_id}", response_model=MedicineResponse)
@@ -2677,11 +2535,11 @@ def get_medicine(medicine_id: int, db: Session = Depends(get_db), current_user: 
     med = query.first()
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
-        
+
     seven_days_ago = datetime.now() - timedelta(days=7)
     new_arrival_ids = {med.id} if med.created_at and med.created_at >= seven_days_ago else set()
     populate_medicine_computed_fields(med, new_arrival_ids)
-    
+
     return med
 
 @app.delete("/medicines/{medicine_id}")
@@ -2694,27 +2552,24 @@ def delete_medicine(medicine_id: int, db: Session = Depends(get_db), current_use
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
 
-    # 10. Prevent staff from deleting medicine records (Only Admin can delete)
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Staff members are not allowed to delete medicines")
 
     populate_medicine_computed_fields(med, set())
-    # Audit log before deletion
     old_val_str = f"Category: {med.category}, Stock: {med.stock}, Price: ₱{med.unit_price}"
     write_medicine_audit_log(
-        db, 
-        "medicine deleted", 
-        med.name, 
-        current_user.email, 
-        current_user.role, 
-        old_value=old_val_str, 
+        db,
+        "medicine deleted",
+        med.name,
+        current_user.email,
+        current_user.role,
+        old_value=old_val_str,
         new_value=None
     )
 
-    # Admin Alert
     create_admin_alert(
-        db, 
-        "MEDICINE_DELETED", 
+        db,
+        "MEDICINE_DELETED",
         f"Medicine '{med.name}' was deleted by {current_user.email} (role: {current_user.role})"
     )
 
@@ -2768,7 +2623,6 @@ def add_supply_batch(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid expiry_date format. Use YYYY-MM-DD.")
 
-    # Auto-generate batch number if not provided
     supply_count = db.query(MedicineSupply).filter(MedicineSupply.medicine_id == medicine_id).count()
     batch_num = supply.batch_number or f"BATCH-{supply_count + 1:03d}"
 
@@ -2803,13 +2657,11 @@ def add_supply_batch(
     sync_inventory_batch_for_supply(db, med, new_supply)
     db.commit()
 
-    # Log stock movement
     sm = StockMovement(medicine_id=medicine_id, type='STOCK_IN', quantity=supply.quantity)
     db.add(sm)
     med.last_restocked_at = datetime.now()
     db.commit()
 
-    # Populate computed fields
     db.refresh(med)
     populate_medicine_computed_fields(med, {medicine_id})
 
@@ -2845,9 +2697,6 @@ def update_supply_batch(
 
     med = supply.medicine
 
-    # Archive/unarchive is a state-only operation. Handle it before the
-    # quantity, price, and date update paths so legacy batches with historical
-    # date inconsistencies can still be archived safely.
     archive_only = (
         updates.is_archived is not None
         and updates.quantity is None
@@ -2885,8 +2734,6 @@ def update_supply_batch(
         if adjustment_type not in {'damages', 'count_correction', 'expired'}:
             raise HTTPException(status_code=422, detail='Invalid adjustment type')
 
-        # Damages and expired quantities are deductions. Count correction is
-        # the actual final count entered by the user.
         if adjustment_type in {'damages', 'expired'}:
             if requested_qty > old_qty:
                 raise HTTPException(
@@ -2947,7 +2794,6 @@ def update_supply_batch(
         old_price = float(supply.selling_price)
         new_price_val = float(updates.selling_price)
 
-        # If a staff member submits a price change, create a PENDING PriceHistory request
         if normalize_user_role(getattr(current_user, 'role', None)) != 'admin':
             price_history = PriceHistory(
                 inventory_id=supply.id,
@@ -2969,7 +2815,6 @@ def update_supply_batch(
                 new_value=f"Requested Price: {new_price_val:.2f}\nReason: {updates.reason or ''}",
             )
         else:
-            # Admins apply price changes immediately and record an APPROVED PriceHistory
             supply.selling_price = new_price_val
             price_history = PriceHistory(
                 inventory_id=supply.id,
@@ -3015,9 +2860,6 @@ def update_supply_batch(
             except ValueError:
                 raise HTTPException(status_code=422, detail="Invalid received_date format. Use YYYY-MM-DD.")
 
-    # Validate the date pair only when this request changes one of the dates.
-    # Archive/unarchive-only requests must still work for legacy batches whose
-    # historical received/expiry dates were saved in an invalid order.
     if (updates.expiry_date is not None or updates.received_date is not None) and supply.received_date and supply.expiry_date <= supply.received_date:
         raise HTTPException(status_code=422, detail="Expiry date must be after the received date.")
 
@@ -3029,8 +2871,6 @@ def update_supply_batch(
 
     if updates.is_archived is not None:
         supply.is_archived = updates.is_archived
-        # Keep the medicine out of the active list only when every batch is archived.
-        # A medicine with at least one valid batch must remain active.
         med.is_archived = bool(med.supplies) and all(batch.is_archived for batch in med.supplies)
         write_medicine_audit_log(
             db,
@@ -3042,9 +2882,6 @@ def update_supply_batch(
             new_value=f"Archived: {updates.is_archived}\nReason: {updates.reason or 'No reason provided'}",
         )
 
-    # Keep the secondary FIFO batch record aligned with the authoritative
-    # medicine_supplies expiry_date. Shelf Life is only used by the client to
-    # suggest a default; it is never consulted here.
     if updates.expiry_date is not None or updates.received_date is not None:
         db.execute(
             text("""
@@ -3100,8 +2937,6 @@ def serialize_price_history_request(db: Session, price_history: PriceHistory) ->
         'expire': 'expired',
     }
     adjustment_type = adjustment_aliases.get(adjustment_type, adjustment_type)
-    # Backward compatibility for pending count edits created before the
-    # adjustment_type column was populated.
     if not adjustment_type and (price_history.old_quantity is not None or price_history.new_quantity is not None):
         adjustment_type = 'count_correction'
 
@@ -3147,19 +2982,19 @@ def review_price_update_request(
         ph = db.query(PriceHistory).filter(PriceHistory.id == request_id).first()
         if not ph:
             raise HTTPException(status_code=404, detail=f"Price update request #{request_id} not found")
-        
+
         current_status = (ph.status or "").strip().upper()
         if current_status and current_status not in ('PENDING', ''):
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Request is already {current_status}. Cannot review a {current_status} request."
             )
 
         action = (payload.action or "").strip().lower()
-        
+
         if not action:
             raise HTTPException(status_code=400, detail="Action (approve/reject) is required")
-        
+
         supply = db.query(MedicineSupply).filter(MedicineSupply.id == ph.inventory_id).first()
 
         if ph.adjustment_type:
@@ -3240,7 +3075,7 @@ def review_price_update_request(
 
         db.refresh(ph)
         return serialize_price_history_request(db, ph)
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -3388,9 +3223,6 @@ def delete_staff(
     if not staff_user:
         raise HTTPException(status_code=404, detail="Staff not found")
 
-    # Clear every staff reference before deleting the account. These columns
-    # are foreign keys, so clearing only added_by can still block deletion
-    # when the staff member edited or was assigned to a medicine.
     db.query(Medicine).filter(Medicine.added_by == staff_id).update({Medicine.added_by: None})
     db.query(Medicine).filter(Medicine.updated_by == staff_id).update({Medicine.updated_by: None})
     db.query(Medicine).filter(Medicine.assigned_staff == staff_id).update({Medicine.assigned_staff: None})
@@ -3448,7 +3280,10 @@ def signup(payload: UserCreate):
         write_audit_log(db, "SIGNUP_CREATED", normalized_email, detail="Initial account created via signup")
         return build_auth_response_with_session(user, db)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 @app.post("/login", response_model=Union[LoginResponse, LoginOTPRequiredResponse])
 def login(form_data: LoginRequest, request_obj: Request = None):
@@ -3461,17 +3296,14 @@ def login(form_data: LoginRequest, request_obj: Request = None):
         if not normalized_email:
             raise HTTPException(status_code=400, detail="Username is required")
 
-        # 1. Brute-force check
         check_rate_limit(normalized_email, ip, db)
 
-        # 2. Check if user exists in DB first
         user = db.query(User).filter(User.email == normalized_email).first()
         if not user:
             write_audit_log(db, "UNAUTHORIZED_LOGIN", normalized_email, ip,
                             "Login attempted for non-existent account")
             raise HTTPException(status_code=401, detail="Unauthorized account")
 
-        # 3. Role and Allowlist/Status checks
         if normalize_user_role(user.role) != "admin":
             status_val = getattr(user, "account_status", "active") or "active"
             if status_val != "active":
@@ -3483,10 +3315,8 @@ def login(form_data: LoginRequest, request_obj: Request = None):
                 )
 
         if verify_password(form_data.password, user.password_hash):
-            # Correct credentials
             record_attempt(normalized_email, ip, success=True, db=db)
-            
-            # If admin, enforce OTP (unless in skip list)
+
             if normalize_user_role(user.role) == "admin":
                 otp_code = generate_reset_code()
                 expires_at = datetime.now() + timedelta(minutes=5)
@@ -3503,12 +3333,17 @@ def login(form_data: LoginRequest, request_obj: Request = None):
                     expires_at=expires_at,
                 ))
                 db.commit()
-
-                send_login_otp_email(
-                    recipient_email=normalized_email,
-                    full_name=user.full_name or user.email,
-                    otp_code=otp_code,
-                )
+                try:
+                    send_login_otp_email(
+                        recipient_email=normalized_email,
+                        full_name=user.full_name or user.email,
+                        otp_code=otp_code,
+                    )
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    print(f"[SMTP ERROR] {exc}")
+                    raise HTTPException(status_code=500, detail=f"Failed to send OTP: {exc}")
 
                 return LoginOTPRequiredResponse(
                     requires_otp=True,
@@ -3516,15 +3351,16 @@ def login(form_data: LoginRequest, request_obj: Request = None):
                     message="OTP sent to your email."
                 )
             else:
-                # Staff or skip-OTP admin: skip OTP, login immediately, update last_login
                 user.last_login = datetime.now()
                 db.commit()
                 return build_auth_response_with_session(user, db)
         else:
-            # Wrong password
             record_attempt(normalized_email, ip, success=False, db=db)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
     raise HTTPException(status_code=401, detail="Incorrect email or password")
 
 @app.post("/login/verify", response_model=LoginResponse)
@@ -3538,7 +3374,6 @@ def verify_login_otp(payload: LoginOTPVerifyRequest):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
 
-        # Allowlist gate for admin, status gate for staff
         if normalize_user_role(user.role) != "admin":
             status_val = getattr(user, "account_status", "active") or "active"
             if status_val != "active":
@@ -3565,10 +3400,12 @@ def verify_login_otp(payload: LoginOTPVerifyRequest):
         otp_record.used_at = datetime.now()
         db.commit()
 
-        # Issue session (single-session enforced inside build_auth_response_with_session)
         return build_auth_response_with_session(user, db)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 @app.post("/auth/password-reset/request", response_model=PasswordResetRequestResponse)
 def request_password_reset(payload: PasswordResetRequest):
@@ -3615,7 +3452,10 @@ def request_password_reset(payload: PasswordResetRequest):
 
         return PasswordResetRequestResponse(message="Reset code sent to your email.")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 @app.post("/auth/password-reset/confirm", response_model=LoginResponse)
 def confirm_password_reset(payload: PasswordResetConfirmRequest):
@@ -3660,18 +3500,19 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest):
         write_audit_log(db, "PASSWORD_RESET", normalized_email)
         return build_auth_response_with_session(user, db)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 @app.post("/auth/google", response_model=LoginResponse)
 def google_auth(payload: GoogleAuthRequest):
-    """Handle Google OAuth callback for an existing database account."""
     db = SessionLocal()
     try:
         if payload.email:
             normalized_email = normalize_email(payload.email)
             user_full_name = payload.full_name or payload.email.split('@')[0]
         else:
-            # No email from Google — reject
             raise HTTPException(status_code=403, detail=UNAUTHORIZED_DETAIL)
 
         user = db.query(User).filter(User.email == normalized_email).first()
@@ -3691,7 +3532,10 @@ def google_auth(payload: GoogleAuthRequest):
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Google auth failed: {str(e)}")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as close_exc:
+            print(f"[WARN] Failed to close DB session: {close_exc}")
 
 # -------------------------------------------------------------
 # Five L Pharmacy - Admin Monitoring & Auditing Endpoints
@@ -3706,8 +3550,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         if owner_id is not None:
             medicine_query = medicine_query.filter(Medicine.owner_admin_id == owner_id)
 
-        # Derive medicine-level expiry from the actual per-batch expiry dates
-        # before calculating dashboard counts and panels.
         dashboard_medicines = medicine_query.all()
         dashboard_arrivals = {
             med.id for med in dashboard_medicines
@@ -3716,7 +3558,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         for med in dashboard_medicines:
             populate_medicine_computed_fields(med, dashboard_arrivals)
 
-        # 1. Base counts. Dosage-form rules override globals when present.
         total_meds = len(dashboard_medicines)
         low_stock_meds = []
         expired_meds = []
@@ -3732,7 +3573,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
             elif med.expiry and today <= med.expiry <= today + timedelta(days=expiry_days):
                 nearing_expiry_meds.append(med)
 
-        # 2. Staff contributions
         staff_query = db.query(User).filter(User.role == "staff")
         if owner_id is not None:
             staff_query = staff_query.filter(User.created_by_admin == owner_id)
@@ -3748,7 +3588,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         scoped_emails = [current_user.email]
         scoped_emails.extend(s.email for s in staff_users if s.email)
 
-        # 3. Most active staff
         active_logs_query = db.query(MedicineAuditLog).filter(MedicineAuditLog.timestamp >= thirty_days_ago)
         if owner_id is not None:
             active_logs_query = active_logs_query.filter(MedicineAuditLog.performed_by.in_(scoped_emails))
@@ -3757,7 +3596,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         for log in active_logs:
             if log.role == "staff":
                 activity_count[log.performed_by] = activity_count.get(log.performed_by, 0) + 1
-        
+
         most_active_staff = "None"
         max_act = 0
         for email, cnt in activity_count.items():
@@ -3766,7 +3605,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 u = db.query(User).filter(User.email == email).first()
                 most_active_staff = u.full_name if u else email
 
-        # 4. Recent activities panel (Requirement 5)
         recent_activities = []
         activities_query = db.query(MedicineAuditLog).order_by(MedicineAuditLog.timestamp.desc())
         if owner_id is not None:
@@ -3784,7 +3622,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "new_value": act.new_value
             })
 
-        # 5. Inventory Timeline (Requirement 11)
         timeline = []
         movements_query = db.query(StockMovement).join(Medicine, Medicine.id == StockMovement.medicine_id)
         if owner_id is not None:
@@ -3816,10 +3653,9 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "timestamp": s.transaction_date.isoformat(),
                 "total": s.total
             })
-        
+
         timeline = sorted(timeline, key=lambda x: x["timestamp"], reverse=True)[:30]
 
-        # 6. Expiration panel detail
         expiration_panel = []
         for m in medicine_query.order_by(Medicine.expiry.asc()).all():
             if m.expiry:
@@ -3837,7 +3673,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                     "category": m.category
                 })
 
-        # 7. Low stock panel detail
         low_stock_panel = []
         for m in dashboard_medicines:
             config = get_inventory_alert_config(db, m.dosage_form)
@@ -3852,7 +3687,6 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "category": m.category
             })
 
-        # 8. All medicines detail for admin
         all_medicines_with_meta = []
         for m in dashboard_medicines:
             added_user = db.query(User).filter(User.id == m.added_by).first()
@@ -3912,7 +3746,6 @@ def get_admin_alerts(db: Session = Depends(get_db), current_user: User = Depends
 def mark_alert_as_read(alert_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
     alert_query = db.query(AdminAlert).filter(AdminAlert.id == alert_id)
     if not is_demo_admin(current_user):
-        # Real admins never receive the demo alert stream.
         raise HTTPException(status_code=404, detail="Alert not found")
     alert = alert_query.first()
     if not alert:
@@ -3952,9 +3785,6 @@ def delete_medicine_audit_logs(current_user: User = Depends(get_current_user)):
         detail="Compliance Violation: Medicine lifecycle audit logs cannot be deleted under any circumstances."
     )
 
-# -------------------
-# Prediction demo
-# -------------------
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest):
     keywords = {
@@ -3976,21 +3806,18 @@ def predict(request: PredictRequest):
 if ML_ENABLED:
     app.include_router(ml_router)
 
-# Transactions router (optional)
 try:
     from transactions import router as transactions_router
     app.include_router(transactions_router)
 except Exception:
     print("[INFO] transactions router not available or failed to load")
 
-# FIFO inventory router
 try:
     from inventory_fifo import router as inventory_fifo_router
     app.include_router(inventory_fifo_router)
 except Exception:
     print("[INFO] FIFO inventory router not available or failed to load")
 
-# Reports router
 try:
     from reports_routes import router as reports_router
     app.include_router(reports_router)
@@ -3998,7 +3825,6 @@ try:
 except Exception as e:
     print(f"[INFO] Reports router not available or failed to load: {e}")
 
-# Centralized Senior Citizen/PWD customer records.
 try:
     from customers import router as customers_router
     app.include_router(customers_router)
@@ -4006,7 +3832,6 @@ try:
 except Exception as e:
     print(f"[INFO] Customer records router not available or failed to load: {e}")
 
-# Settings router
 try:
     from settings_routes import router as settings_router
     app.include_router(settings_router)
