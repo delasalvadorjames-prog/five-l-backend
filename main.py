@@ -1,4 +1,5 @@
 import calendar
+import asyncio
 import csv
 import io
 import os
@@ -7,6 +8,7 @@ import re
 import smtplib
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -46,11 +48,37 @@ except ImportError:
     print("[WARNING] ML module not available, disabling ML endpoints")
 
 # -------------------
+# Application lifecycle
+# -------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Run the existing database initialization during application startup.
+    on_startup()
+
+    async def keep_alive():
+        while True:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                print("Database keep-alive: OK")
+            except Exception as exc:
+                print(f"Database keep-alive error: {exc}")
+            await asyncio.sleep(240)  # Every 4 minutes
+
+    task = asyncio.create_task(keep_alive())
+    try:
+        yield
+    finally:
+        # Shutdown: cancel the keep-alive task.
+        task.cancel()
+
+
+# -------------------
 # Base setup
 # -------------------
 Base = declarative_base()
 
-app = FastAPI(title="Five L Pharmacy API - MySQL", version="0.5.0")
+app = FastAPI(title="Five L Pharmacy API - MySQL", version="0.5.0", lifespan=lifespan)
 
 app.state.db_ready = False
 app.state.startup_error = "Database not initialized."
@@ -452,10 +480,17 @@ class AdminAlert(Base):
 engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
-    pool_recycle=280,      # I-recycle kada 280 segundo (< 300s timeout ng MySQL)
-    pool_size=5,           # Maximum na connections sa pool
-    max_overflow=10,       # Extra connections kung kailangan
-)
+    pool_recycle=280,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    connect_args={
+        "connect_timeout": 10,
+        "read_timeout": 30,
+        "write_timeout": 30,
+    },
+)       # Extra connections kung kailangan
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
@@ -1838,7 +1873,6 @@ def seed_data():
     finally:
         db.close()
 
-@app.on_event("startup")
 def on_startup():
     try:
         with engine.connect() as conn:
