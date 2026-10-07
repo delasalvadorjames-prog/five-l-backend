@@ -726,6 +726,10 @@ class StaffPermissionsUpdate(BaseModel):
     can_adjust_inventory: bool
     can_approve_voids: bool
 
+
+class StaffPasswordReset(BaseModel):
+    new_password: str = Field(..., min_length=8, max_length=128)
+
 class StaffAssignmentUpdate(BaseModel):
     assigned_category: str
 
@@ -2237,8 +2241,22 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     med_name = medicine.medicine_name or medicine.name
     if not med_name:
         raise HTTPException(status_code=422, detail="Medicine name is required")
-        
-    category = "Others" if (medicine.dosage_form or "").strip().lower() in {"other", "medical supply", "medical device"} else (medicine.category or "Pain Relief")
+
+    requested_category = (medicine.category or "").strip()
+    is_non_medicine = (medicine.dosage_form or "").strip().lower() in {"other", "medical supply", "medical device"}
+    category = "Others" if is_non_medicine else (requested_category or "Pain Relief")
+    if normalize_user_role(getattr(current_user, "role", None)) != "admin":
+        assigned_categories = {
+            value.strip().lower()
+            for value in (current_user.assigned_category or "").split(",")
+            if value.strip()
+        }
+        if category.lower() not in assigned_categories:
+            raise HTTPException(
+                status_code=403,
+                detail="Staff can only add medicines under categories assigned by an administrator.",
+            )
+
     classification = medicine.classification or "Generic"
     dosage_form = medicine.dosage_form or "Tablet"
     strength = medicine.strength
@@ -3265,6 +3283,25 @@ def update_staff_permissions(
     db.refresh(staff_user)
     write_audit_log(db, "STAFF_PERMISSIONS_CHANGED", staff_user.email, detail=f"Permissions updated by admin {current_user.email}")
     return build_staff_response(staff_user)
+
+@app.put("/staff/{staff_id}/password", response_model=StaffResponse)
+def reset_staff_password(
+    staff_id: int,
+    payload: StaffPasswordReset,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    staff_user = db.query(User).filter(User.id == staff_id, User.role == "staff").first()
+    if not staff_user:
+        raise HTTPException(status_code=404, detail="Staff not found")
+
+    staff_user.password_hash = get_password_hash(payload.new_password)
+    staff_user.active_token = None
+    db.commit()
+    db.refresh(staff_user)
+    write_audit_log(db, "STAFF_PASSWORD_RESET", staff_user.email, detail=f"Password reset by admin {current_user.email}")
+    return build_staff_response(staff_user)
+
 
 @app.delete("/staff/{staff_id}")
 def delete_staff(

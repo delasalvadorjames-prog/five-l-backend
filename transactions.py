@@ -115,6 +115,18 @@ class Transaction(Base):
     created_at = Column(DateTime, nullable=False, server_default=text('CURRENT_TIMESTAMP'))
 
 
+class TransactionVoidRequest(Base):
+    __tablename__ = "transaction_void_requests"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    transaction_id = Column(Integer, nullable=False, index=True)
+    requested_by = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, server_default="PENDING", index=True)
+    reviewed_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=text('CURRENT_TIMESTAMP'))
+    reviewed_at = Column(DateTime, nullable=True)
+
+
 Base.metadata.create_all(bind=engine)
 
 
@@ -214,6 +226,23 @@ class TransactionOut(BaseModel):
     other_discount: Optional[float]
     net_sales: Optional[float]
     created_at: datetime
+
+
+class VoidRequestCreate(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class VoidRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    transaction_id: int
+    requested_by: str
+    reason: Optional[str]
+    status: str
+    reviewed_by: Optional[str]
+    created_at: datetime
+    reviewed_at: Optional[datetime]
 
 
 def gen_txn_number() -> str:
@@ -436,6 +465,106 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
         db.close()
 
 
+def _void_transaction(db, txn_row: Transaction, actor_email: str) -> None:
+    """Restore stock and remove a completed transaction after approval."""
+    transaction_number = txn_row.transaction_number
+    quantity = txn_row.quantity
+    medicine_id = txn_row.medicine_id
+    price = txn_row.price
+
+    db.execute(text("UPDATE medicines SET stock = stock + :qty WHERE id = :id"), {"qty": quantity, "id": medicine_id})
+    rev_batch = f"REVERSAL-{transaction_number}"
+    expiry = (date.today() + timedelta(days=3650)).isoformat()
+    db.execute(text("INSERT INTO medicine_supplies (medicine_id, batch_number, quantity, supplier, expiry_date, unit_cost, selling_price, created_at) VALUES (:mid, :batch, :qty, :supplier, :expiry, :unit_cost, :selling_price, NOW())"), {
+        "mid": medicine_id,
+        "batch": rev_batch,
+        "qty": quantity,
+        "supplier": "reversal",
+        "expiry": expiry,
+        "unit_cost": price * 0.7,
+        "selling_price": price,
+    })
+    db.delete(txn_row)
+    db.flush()
+    db.execute(text("INSERT INTO audit_logs (event_type, detail, created_at) VALUES (:et, :dt, NOW())"), {
+        "et": "TRANSACTION_VOIDED",
+        "dt": f"Transaction {transaction_number} voided by {actor_email}; stock restored: {quantity}",
+    })
+
+
+@router.post("/transactions/{txn_id}/void-request", response_model=VoidRequestOut, status_code=status.HTTP_201_CREATED)
+def request_transaction_void(txn_id: int, payload: VoidRequestCreate, current_user=Depends(get_transaction_user)):
+    db = SessionLocal()
+    try:
+        if (getattr(current_user, "role", "staff") or "staff").lower() != "staff":
+            raise HTTPException(status_code=400, detail="Administrators can void transactions directly")
+        txn_row = db.query(Transaction).filter(Transaction.id == txn_id).first()
+        if not txn_row:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        existing = db.query(TransactionVoidRequest).filter(
+            TransactionVoidRequest.transaction_id == txn_id,
+            TransactionVoidRequest.status == "PENDING",
+        ).first()
+        if existing:
+            return existing
+        request = TransactionVoidRequest(
+            transaction_id=txn_id,
+            requested_by=current_user.email,
+            reason=(payload.reason or "Staff requested transaction void").strip(),
+        )
+        db.add(request)
+        db.flush()
+        db.execute(text("INSERT INTO audit_logs (event_type, detail, created_at) VALUES (:et, :dt, NOW())"), {
+            "et": "TRANSACTION_VOID_REQUESTED",
+            "dt": f"Transaction {txn_row.transaction_number} void requested by {current_user.email}",
+        })
+        db.commit()
+        db.refresh(request)
+        return request
+    finally:
+        db.close()
+
+
+@router.get("/transactions/void-requests", response_model=List[VoidRequestOut])
+def list_transaction_void_requests(current_user=Depends(get_transaction_user)):
+    db = SessionLocal()
+    try:
+        query = db.query(TransactionVoidRequest).order_by(TransactionVoidRequest.created_at.desc())
+        if (getattr(current_user, "role", "staff") or "staff").lower() != "admin":
+            query = query.filter(TransactionVoidRequest.requested_by == current_user.email)
+        return query.limit(100).all()
+    finally:
+        db.close()
+
+
+@router.post("/transactions/void-requests/{request_id}/review", response_model=VoidRequestOut)
+def review_transaction_void_request(request_id: int, action: str = Query(..., pattern="^(approve|reject)$"), current_user=Depends(get_transaction_user)):
+    db = SessionLocal()
+    try:
+        if (getattr(current_user, "role", "staff") or "staff").lower() != "admin":
+            raise HTTPException(status_code=403, detail="Only administrators can review void requests")
+        request = db.query(TransactionVoidRequest).filter(TransactionVoidRequest.id == request_id).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Void request not found")
+        if request.status != "PENDING":
+            raise HTTPException(status_code=400, detail="Void request has already been reviewed")
+        txn_row = db.query(Transaction).filter(Transaction.id == request.transaction_id).first()
+        if action == "approve":
+            if not txn_row:
+                raise HTTPException(status_code=404, detail="Transaction no longer exists")
+            _void_transaction(db, txn_row, current_user.email)
+            request.status = "APPROVED"
+        else:
+            request.status = "REJECTED"
+        request.reviewed_by = current_user.email
+        request.reviewed_at = datetime.now()
+        db.commit()
+        db.refresh(request)
+        return request
+    finally:
+        db.close()
+
+
 @router.delete("/transactions/{txn_id}")
 def delete_transaction(txn_id: int, current_user=Depends(get_transaction_user)):
     db = SessionLocal()
@@ -448,27 +577,7 @@ def delete_transaction(txn_id: int, current_user=Depends(get_transaction_user)):
         if not is_admin:
             raise HTTPException(status_code=403, detail="Only administrators can void transactions")
 
-        # restore stock to medicines and create a reversal supply row
-        db.execute(text("UPDATE medicines SET stock = stock + :qty WHERE id = :id"), {"qty": txn_row.quantity, "id": txn_row.medicine_id})
-        # Insert reversal supply to keep supplies ledger consistent
-        rev_batch = f"REVERSAL-{txn_row.transaction_number}"
-        expiry = (date.today() + timedelta(days=3650)).isoformat()
-        db.execute(text("INSERT INTO medicine_supplies (medicine_id, batch_number, quantity, supplier, expiry_date, unit_cost, selling_price, created_at) VALUES (:mid, :batch, :qty, :supplier, :expiry, :unit_cost, :selling_price, NOW())"), {
-            "mid": txn_row.medicine_id,
-            "batch": rev_batch,
-            "qty": txn_row.quantity,
-            "supplier": "reversal",
-            "expiry": expiry,
-            "unit_cost": txn_row.price * 0.7,
-            "selling_price": txn_row.price,
-        })
-
-        # Delete transaction
-        db.delete(txn_row)
-        db.commit()
-
-        detail = f"Transaction {txn_row.transaction_number} deleted and stock restored by {txn_row.quantity}"
-        db.execute(text("INSERT INTO audit_logs (event_type, detail, created_at) VALUES (:et, :dt, NOW())"), {"et": "TRANSACTION_DELETED", "dt": detail})
+        _void_transaction(db, txn_row, current_user.email)
         db.commit()
         return {"status": "ok"}
     except HTTPException:
