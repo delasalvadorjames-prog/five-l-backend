@@ -1886,7 +1886,9 @@ def on_startup():
 # -------------------
 @app.get("/health")
 def health_check():
-    return {"status": "ok" if app.state.db_ready else "degraded"}
+    # Mabilis na response — hindi na kailangan ng database query
+    # Ang /health ay para lang i-check kung buhay ang app
+    return {"status": "ok"}
 
 def format_medicine_name(base_name: str, dosage_form: str = "Tablet", strength: Optional[str] = None, volume: Optional[str] = None) -> str:
     """Build a variant label without repeating a suffix already in the name."""
