@@ -113,6 +113,7 @@ class Transaction(Base):
     other_discount = Column(Float, nullable=True)
     net_sales = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=text('CURRENT_TIMESTAMP'))
+    owner_admin_id = Column(Integer, nullable=True, index=True)
 
 
 class TransactionVoidRequest(Base):
@@ -125,6 +126,7 @@ class TransactionVoidRequest(Base):
     reviewed_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=text('CURRENT_TIMESTAMP'))
     reviewed_at = Column(DateTime, nullable=True)
+    owner_admin_id = Column(Integer, nullable=True, index=True)
 
 
 Base.metadata.create_all(bind=engine)
@@ -259,6 +261,10 @@ def list_transactions(
     db = SessionLocal()
     try:
         q = db.query(Transaction).order_by(Transaction.created_at.desc())
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        if owner_id is not None:
+            q = q.filter(Transaction.owner_admin_id == owner_id)
         if (getattr(current_user, "role", "staff") or "staff").lower() != "admin":
             q = q.filter(Transaction.cashier_name == current_user.email)
         if search:
@@ -275,6 +281,7 @@ def list_transactions(
 def create_transaction(payload: TransactionCreate, current_user=Depends(get_transaction_user)):
     db = SessionLocal()
     try:
+        from main import data_owner_id
         if payload.customer_id is not None:
             customer = db.execute(
                 text("SELECT id, customer_type, id_number, full_name, status FROM customers WHERE id = :id"),
@@ -288,7 +295,12 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
                 raise HTTPException(status_code=400, detail="Customer type does not match the selected record")
 
         # validate medicine exists
-        med = db.execute(text("SELECT id, name, stock FROM medicines WHERE id = :id"), {"id": payload.medicine_id}).first()
+        owner_id = data_owner_id(current_user)
+        med_owner_sql = "" if owner_id is None else " AND owner_admin_id = :owner_admin_id"
+        med = db.execute(
+            text(f"SELECT id, name, stock FROM medicines WHERE id = :id{med_owner_sql}"),
+            {"id": payload.medicine_id, "owner_admin_id": owner_id},
+        ).first()
         if not med:
             raise HTTPException(status_code=404, detail="Medicine not found")
 
@@ -370,6 +382,19 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
             {"id": payload.medicine_id},
         )
 
+        # PWD receives the discount only; VAT remains included. Senior citizens
+        # are the only protected customer type that is VAT-exempt.
+        gross_amount = payload.gross_amount or round(payload.quantity * payload.price, 2)
+        vatable_sales = payload.vatable_sales
+        vat_amount = payload.vat_amount
+        vat_exempt_sales = payload.vat_exempt_sales
+        pwd_discount = payload.pwd_discount
+        if payload.customer_type == "pwd":
+            vatable_sales = round(gross_amount / 1.12, 2)
+            vat_amount = round(gross_amount - vatable_sales, 2)
+            vat_exempt_sales = 0
+            pwd_discount = payload.discount_amount or 0
+
         txn = Transaction(
             transaction_number=gen_txn_number(),
             sale_reference=payload.sale_reference,
@@ -399,15 +424,16 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
             classification=payload.classification,
             dosage_form=payload.dosage_form,
             customer_type=payload.customer_type,
-            gross_amount=payload.gross_amount,
-            vatable_sales=payload.vatable_sales,
-            vat_amount=payload.vat_amount,
-            vat_exempt_sales=payload.vat_exempt_sales,
+            gross_amount=gross_amount,
+            vatable_sales=vatable_sales,
+            vat_amount=vat_amount,
+            vat_exempt_sales=vat_exempt_sales,
             discount_amount=payload.discount_amount,
             senior_citizen_discount=payload.senior_citizen_discount,
-            pwd_discount=payload.pwd_discount,
+            pwd_discount=pwd_discount,
             other_discount=payload.other_discount,
             net_sales=payload.net_sales,
+            owner_admin_id=data_owner_id(current_user),
         )
         db.add(txn)
         db.commit()
@@ -511,6 +537,7 @@ def request_transaction_void(txn_id: int, payload: VoidRequestCreate, current_us
             transaction_id=txn_id,
             requested_by=current_user.email,
             reason=(payload.reason or "Staff requested transaction void").strip(),
+            owner_admin_id=data_owner_id(current_user),
         )
         db.add(request)
         db.flush()
@@ -529,7 +556,11 @@ def request_transaction_void(txn_id: int, payload: VoidRequestCreate, current_us
 def list_transaction_void_requests(current_user=Depends(get_transaction_user)):
     db = SessionLocal()
     try:
+        from main import data_owner_id
         query = db.query(TransactionVoidRequest).order_by(TransactionVoidRequest.created_at.desc())
+        owner_id = data_owner_id(current_user)
+        if owner_id is not None:
+            query = query.filter(TransactionVoidRequest.owner_admin_id == owner_id)
         if (getattr(current_user, "role", "staff") or "staff").lower() != "admin":
             query = query.filter(TransactionVoidRequest.requested_by == current_user.email)
         return query.limit(100).all()
@@ -543,12 +574,20 @@ def review_transaction_void_request(request_id: int, action: str = Query(..., pa
     try:
         if (getattr(current_user, "role", "staff") or "staff").lower() != "admin":
             raise HTTPException(status_code=403, detail="Only administrators can review void requests")
-        request = db.query(TransactionVoidRequest).filter(TransactionVoidRequest.id == request_id).first()
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        request_query = db.query(TransactionVoidRequest).filter(TransactionVoidRequest.id == request_id)
+        if owner_id is not None:
+            request_query = request_query.filter(TransactionVoidRequest.owner_admin_id == owner_id)
+        request = request_query.first()
         if not request:
             raise HTTPException(status_code=404, detail="Void request not found")
         if request.status != "PENDING":
             raise HTTPException(status_code=400, detail="Void request has already been reviewed")
-        txn_row = db.query(Transaction).filter(Transaction.id == request.transaction_id).first()
+        txn_query = db.query(Transaction).filter(Transaction.id == request.transaction_id)
+        if owner_id is not None:
+            txn_query = txn_query.filter(Transaction.owner_admin_id == owner_id)
+        txn_row = txn_query.first()
         if action == "approve":
             if not txn_row:
                 raise HTTPException(status_code=404, detail="Transaction no longer exists")
@@ -569,7 +608,12 @@ def review_transaction_void_request(request_id: int, action: str = Query(..., pa
 def delete_transaction(txn_id: int, current_user=Depends(get_transaction_user)):
     db = SessionLocal()
     try:
-        txn_row = db.query(Transaction).filter(Transaction.id == txn_id).first()
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        txn_query = db.query(Transaction).filter(Transaction.id == txn_id)
+        if owner_id is not None:
+            txn_query = txn_query.filter(Transaction.owner_admin_id == owner_id)
+        txn_row = txn_query.first()
         if not txn_row:
             raise HTTPException(status_code=404, detail="Transaction not found")
 

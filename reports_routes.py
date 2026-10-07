@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -42,6 +42,34 @@ def _db():
 # ---------------------------------------------------------------------------
 router = APIRouter(prefix="/reports", tags=["reports"])
 # ---------------------------------------------------------------------------
+
+
+async def _get_current_user(authorization: str = Header(None)):
+    """Reuse the application's JWT authentication for every report endpoint."""
+    from main import get_current_user as main_get_current_user
+
+    db = _SessionLocal()
+    try:
+        return await main_get_current_user(authorization, db)
+    finally:
+        db.close()
+
+
+def _apply_owner_scope(where: str, params: dict, current_user, alias: str) -> str:
+    """Limit report rows to the logged-in admin's data.
+
+    The demo admin intentionally remains unscoped so it can display the
+    seeded demo workspace. Real admins only see records owned by themselves.
+    """
+    from main import data_owner_id
+
+    owner_id = data_owner_id(current_user)
+    if owner_id is None:
+        return where
+
+    params["owner_admin_id"] = owner_id
+    clause = f"{alias}.owner_admin_id = :owner_admin_id"
+    return f"{where} {'AND' if where else 'WHERE'} {clause}"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 def _build_txn_filters(
@@ -153,30 +181,32 @@ def get_bir_report(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
     vat_type: Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     """Return BIR figures from the transaction-level tax fields saved by POS."""
     db = _SessionLocal()
     try:
         where, params = _build_txn_filters(date_from, date_to, month, year, category, payment_method, supplier, search)
+        where = _apply_owner_scope(where, params, current_user, "t")
         extra = []
         if customer_type:
             extra.append("t.customer_type = :customer_type")
             params["customer_type"] = customer_type
         if vat_type == "vatable":
-            extra.append("CASE WHEN t.customer_type IN ('senior_citizen', 'pwd') THEN COALESCE(t.vatable_sales, 0) ELSE COALESCE(t.vatable_sales, t.total_amount / 1.12) END > 0")
+            extra.append("CASE WHEN t.customer_type = 'senior_citizen' THEN COALESCE(t.vatable_sales, 0) ELSE COALESCE(t.vatable_sales, t.total_amount / 1.12) END > 0")
         elif vat_type == "vat_exempt":
-            extra.append("CASE WHEN t.customer_type IN ('senior_citizen', 'pwd') THEN COALESCE(t.vat_exempt_sales, 0) ELSE COALESCE(t.vat_exempt_sales, 0) END > 0")
+            extra.append("CASE WHEN t.customer_type = 'senior_citizen' THEN COALESCE(t.vat_exempt_sales, 0) ELSE 0 END > 0")
         if extra:
             where = f"{where} {'AND' if where else 'WHERE'} {' AND '.join(extra)}"
 
         rows = db.execute(text(f"""
               SELECT t.transaction_number, t.created_at, COALESCE(t.customer_type, 'unknown'),
                     COALESCE(NULLIF(t.gross_amount, 0), t.total_amount),
-                    CASE WHEN t.customer_type IN ('senior_citizen', 'pwd') THEN COALESCE(t.vatable_sales, 0)
+                    CASE WHEN t.customer_type = 'senior_citizen' THEN COALESCE(t.vatable_sales, 0)
                         ELSE COALESCE(t.vatable_sales, t.total_amount / 1.12) END,
-                    CASE WHEN t.customer_type IN ('senior_citizen', 'pwd') THEN COALESCE(t.vat_amount, 0)
+                    CASE WHEN t.customer_type = 'senior_citizen' THEN COALESCE(t.vat_amount, 0)
                         ELSE COALESCE(t.vat_amount, t.total_amount - (t.total_amount / 1.12)) END,
-                    CASE WHEN t.customer_type IN ('senior_citizen', 'pwd')
+                    CASE WHEN t.customer_type = 'senior_citizen'
                         THEN COALESCE(t.vat_exempt_sales, t.total_amount / 1.12)
                         ELSE COALESCE(t.vat_exempt_sales, 0) END,
                     COALESCE(t.discount_amount, 0), COALESCE(NULLIF(t.net_sales, 0), t.total_amount),
@@ -227,10 +257,12 @@ def get_dashboard(
     payment_method: Optional[str] = Query(None),
     supplier:  Optional[str]  = Query(None),
     search:    Optional[str]  = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where_txn, params = _build_txn_filters(date_from, date_to, month, year, category, payment_method, supplier, search)
+        where_txn = _apply_owner_scope(where_txn, params, current_user, "t")
 
         # revenue & transactions
         txn_sql = f"""
@@ -257,6 +289,7 @@ def get_dashboard(
         sixty_days = (date.today() + timedelta(days=60)).isoformat()
 
         where_inv, inv_params = _build_inv_filters(category, supplier, search)
+        where_inv = _apply_owner_scope(where_inv, inv_params, current_user, "m")
         inv_params.update({"today": today, "sixty": sixty_days})
 
         inv_sql = f"""
@@ -306,10 +339,12 @@ def get_sales(
     supplier:  Optional[str] = Query(None),
     search:    Optional[str] = Query(None),
     group_by:  Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where, params = _build_txn_filters(date_from, date_to, month, year, category, payment_method, supplier, search)
+        where = _apply_owner_scope(where, params, current_user, "t")
 
         period_expression = (
             "DATE_FORMAT(t.created_at, '%Y-%m-%d')"
@@ -381,10 +416,12 @@ def get_inventory(
     non_medicine_low_stock_threshold: int = Query(10, ge=1),
     non_medicine_expiry_alert_days: int = Query(30, ge=1),
     include_expired: bool = Query(False),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where, params = _build_inv_filters(category, supplier, search)
+        where = _apply_owner_scope(where, params, current_user, "m")
         today = date.today().isoformat()
         expiry_cutoff = (date.today() + timedelta(days=expiry_alert_days)).isoformat()
         non_medicine_expiry_cutoff = (date.today() + timedelta(days=non_medicine_expiry_alert_days)).isoformat()
@@ -498,6 +535,7 @@ def get_inventory_adjustments(
     category: Optional[str] = Query(None),
     supplier: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     """Return inventory adjustment requests/history for the selected adjustment type."""
     db = _SessionLocal()
@@ -528,6 +566,11 @@ def get_inventory_adjustments(
         if search:
             clauses.append("(m.name LIKE :search OR m.medicine_name LIKE :search OR s.batch_number LIKE :search)")
             params["search"] = f"%{search}%"
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        if owner_id is not None:
+            clauses.append("m.owner_admin_id = :owner_admin_id")
+            params["owner_admin_id"] = owner_id
 
         rows = db.execute(text(f"""
             SELECT ph.id,
@@ -583,6 +626,7 @@ def get_stock_movements(
     supplier: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     movement_type: Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     """Return inventory deductions from POS sales and manual stock-out logs."""
     db = _SessionLocal()
@@ -628,6 +672,12 @@ def get_stock_movements(
             movement_clauses.append("sm.type = :movement_type")
             transaction_clauses.append(":movement_type = 'STOCK_OUT'")
             params["movement_type"] = movement_type
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        if owner_id is not None:
+            movement_clauses.append("m.owner_admin_id = :owner_admin_id")
+            transaction_clauses.append("m.owner_admin_id = :owner_admin_id")
+            params["owner_admin_id"] = owner_id
         movement_where = " AND ".join(movement_clauses)
         transaction_where = " AND ".join(transaction_clauses) if transaction_clauses else "1=1"
 
@@ -693,10 +743,12 @@ def get_top_products(
     supplier:  Optional[str] = Query(None),
     search:    Optional[str] = Query(None),
     limit:     int           = Query(10, ge=1, le=50),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where, params = _build_txn_filters(date_from, date_to, month, year, category, payment_method, supplier, search)
+        where = _apply_owner_scope(where, params, current_user, "t")
         params["lim"] = limit
 
         rows = db.execute(text(f"""
@@ -747,10 +799,12 @@ def get_payment_methods(
     category:  Optional[str] = Query(None),
     supplier:  Optional[str] = Query(None),
     search:    Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where, params = _build_txn_filters(date_from, date_to, month, year, category, None, supplier, search)
+        where = _apply_owner_scope(where, params, current_user, "t")
 
         rows = db.execute(text(f"""
             SELECT
@@ -788,10 +842,12 @@ def get_purchases(
     year:      Optional[int] = Query(None),
     category:  Optional[str] = Query(None),
     supplier:  Optional[str] = Query(None),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
         where, params = _build_purchase_filters(date_from, date_to, month, year, category, supplier)
+        where = _apply_owner_scope(where, params, current_user, "m")
 
         rows = db.execute(text(f"""
             SELECT
@@ -821,6 +877,7 @@ def get_purchases(
 def get_forecast(
     category: Optional[str] = Query(None),
     months_ahead: int       = Query(3, ge=1, le=12),
+    current_user=Depends(_get_current_user),
 ):
     db = _SessionLocal()
     try:
@@ -831,6 +888,12 @@ def get_forecast(
             cat_join  = "LEFT JOIN medicines m ON t.medicine_id = m.id"
             cat_where = "AND m.category = :cat"
             params["cat"] = category
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        owner_clause = ""
+        if owner_id is not None:
+            owner_clause = " AND t.owner_admin_id = :owner_admin_id"
+            params["owner_admin_id"] = owner_id
 
         # past 12 months actual data
         rows = db.execute(text(f"""
@@ -840,12 +903,17 @@ def get_forecast(
             FROM transactions t
             {cat_join}
             WHERE t.created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-            {cat_where}
+            {cat_where}{owner_clause}
             GROUP BY period
             ORDER BY period ASC
         """), params).fetchall()
 
         actuals = [{"period": r[0], "revenue": float(r[1]), "type": "actual"} for r in rows]
+
+        # A new real admin starts with an empty workspace. Do not manufacture
+        # forecast rows when there is no owned transaction history yet.
+        if not actuals:
+            return {"actuals": [], "forecast": []}
 
         # simple moving average for forecast
         revenues = [a["revenue"] for a in actuals]

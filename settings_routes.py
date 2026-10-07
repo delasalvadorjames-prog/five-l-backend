@@ -125,6 +125,15 @@ async def require_admin_user(current_user = Depends(get_current_user)):
     return main_require_admin_user(current_user)
 
 
+def _owner_scope(current_user, alias: str = ""):
+    """Demo admin sees demo records; every other admin sees only own records."""
+    from main import data_owner_id
+    owner_id = data_owner_id(current_user)
+    if owner_id is None:
+        return "", {}
+    return f" AND {alias}owner_admin_id = :owner_admin_id", {"owner_admin_id": owner_id}
+
+
 @router.get('/inventory-alert-configs', response_model=List[InventoryAlertConfigResponse])
 async def get_inventory_alert_configs(
     db: Session = Depends(get_db),
@@ -262,18 +271,19 @@ async def get_categories(
     """Get all categories"""
     try:
         id_column, name_column, product_join = _category_schema(db)
-        _sync_inventory_categories(db, name_column)
+        owner_sql, owner_params = _owner_scope(current_user, "c.")
         
         query = f"""
             SELECT c.{id_column} as id, c.{name_column} as name, c.description,
                    COALESCE(COUNT(p.id), 0) as product_count
             FROM categories c
             LEFT JOIN products p ON {product_join}
+            WHERE 1=1 {owner_sql}
             GROUP BY c.{id_column}, c.{name_column}, c.description
             ORDER BY c.{name_column}
         """
         
-        categories_data = db.execute(text(query)).fetchall()
+        categories_data = db.execute(text(query), owner_params).fetchall()
         
         result = []
         for row in categories_data:
@@ -302,12 +312,13 @@ async def create_category(
     """Create a new category"""
     try:
         id_column, name_column, _ = _category_schema(db)
+        owner_sql, owner_params = _owner_scope(current_user)
         
         # Check for duplicate
         duplicate_query = f"""
-            SELECT {id_column} FROM categories WHERE {name_column} = :name
+            SELECT {id_column} FROM categories WHERE {name_column} = :name {owner_sql}
         """
-        existing = db.execute(text(duplicate_query), {"name": request.name.strip()}).first()
+        existing = db.execute(text(duplicate_query), {"name": request.name.strip(), **owner_params}).first()
         
         if existing:
             raise HTTPException(
@@ -316,13 +327,14 @@ async def create_category(
             )
         
         insert_query = f"""
-            INSERT INTO categories ({name_column}, description)
-            VALUES (:name, :description)
+            INSERT INTO categories ({name_column}, description, owner_admin_id)
+            VALUES (:name, :description, :owner_admin_id)
         """
         
         db.execute(text(insert_query), {
             "name": request.name.strip(),
-            "description": request.description.strip() if request.description else None
+            "description": request.description.strip() if request.description else None,
+            "owner_admin_id": owner_params.get("owner_admin_id"),
         })
 
         db.commit()
@@ -474,16 +486,18 @@ async def get_suppliers(
 ):
     """Get all suppliers"""
     try:
-        suppliers_data = db.execute(text("""
+        owner_sql, owner_params = _owner_scope(current_user, "s.")
+        suppliers_data = db.execute(text(f"""
             SELECT s.supplier_id as id, s.supplier_name as name, 
                    s.contact_person, s.email, s.phone, s.address,
                    NULL as city, NULL as country, NULL as payment_terms,
                    COALESCE(COUNT(ib.id), 0) as batch_count
             FROM suppliers s
             LEFT JOIN inventory_batches ib ON ib.supplier = s.supplier_name
+            WHERE 1=1 {owner_sql}
             GROUP BY s.supplier_id, s.supplier_name, s.contact_person, s.email, s.phone, s.address
             ORDER BY s.supplier_name
-        """)).fetchall()
+        """), owner_params).fetchall()
         
         result = []
         for row in suppliers_data:
@@ -517,9 +531,10 @@ async def create_supplier(
 ):
     """Create a new supplier"""
     try:
-        existing = db.execute(text("""
-            SELECT supplier_id FROM suppliers WHERE supplier_name = :name
-        """), {"name": request.name.strip()}).first()
+        owner_sql, owner_params = _owner_scope(current_user)
+        existing = db.execute(text(f"""
+            SELECT supplier_id FROM suppliers WHERE supplier_name = :name {owner_sql}
+        """), {"name": request.name.strip(), **owner_params}).first()
         
         if existing:
             raise HTTPException(
@@ -528,14 +543,15 @@ async def create_supplier(
             )
         
         result = db.execute(text("""
-            INSERT INTO suppliers (supplier_name, contact_person, email, phone, address)
-            VALUES (:name, :contact_person, :email, :phone, :address)
+            INSERT INTO suppliers (supplier_name, contact_person, email, phone, address, owner_admin_id)
+            VALUES (:name, :contact_person, :email, :phone, :address, :owner_admin_id)
         """), {
             "name": request.name.strip(),
             "contact_person": request.contact_person.strip() if request.contact_person else None,
             "email": request.email.strip() if request.email else None,
             "phone": request.phone.strip() if request.phone else None,
-            "address": request.address.strip() if request.address else None
+            "address": request.address.strip() if request.address else None,
+            "owner_admin_id": owner_params.get("owner_admin_id"),
         })
         
         db.commit()

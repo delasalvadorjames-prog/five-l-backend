@@ -216,11 +216,25 @@ JWT_EXPIRES_HOURS = read_int_env("JWT_EXPIRES_HOURS", 2)
 
 # DB Reset on Startup
 RESET_DB_ON_STARTUP = read_bool_env("FIVE_L_RESET_DB", False)
+# Demo/sample records must never be inserted into a production database by
+# default. Enable this explicitly only for a demo environment.
+SEED_DEMO_DATA = read_bool_env("FIVE_L_SEED_DEMO_DATA", False)
 RESET_CODE_EXPIRY_MINUTES = read_int_env("RESET_CODE_EXPIRY_MINUTES", 15)
 
 # Security — allowed email allowlist
 _raw_allowed = os.getenv("ALLOWED_EMAILS", "delasalvadorjames@gmail.com,jeremiassalvador@five-l")
 ALLOWED_EMAILS: set = {e.strip().lower() for e in _raw_allowed.split(",") if e.strip()}
+DEMO_ADMIN_EMAIL = "delasalvadorjames@gmail.com"
+
+def is_demo_admin(user: Optional[object]) -> bool:
+    return bool(user and (user.email or "").strip().lower() == DEMO_ADMIN_EMAIL)
+
+def data_owner_id(user: object) -> Optional[int]:
+    if is_demo_admin(user):
+        return None
+    if (getattr(user, "role", "staff") or "staff").lower() == "staff":
+        return getattr(user, "created_by_admin", None) or getattr(user, "id", None)
+    return getattr(user, "id", None)
 
 # Brute-force protection config
 MAX_LOGIN_ATTEMPTS = read_int_env("MAX_LOGIN_ATTEMPTS", 3)
@@ -306,6 +320,7 @@ class Medicine(Base):
     unit_price = Column(Float, nullable=True)
     supplier = Column(String(200), nullable=True)
     added_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+    owner_admin_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     updated_by = Column(Integer, ForeignKey('users.id'), nullable=True)
     assigned_staff = Column(Integer, ForeignKey('users.id'), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
@@ -782,13 +797,24 @@ def normalize_email(email: str) -> str:
 
 
 def has_admin_account(db: Session) -> bool:
-    """Return whether the database already contains an administrator."""
-    return db.query(User).filter(func.lower(User.role) == "admin").first() is not None
+    """Return whether a real administrator exists.
+
+    The demo account keeps the admin role so it can exercise the admin UI,
+    but it must not be treated as one of the two real admin accounts.
+    """
+    return count_admin_accounts(db) > 0
 
 
 def count_admin_accounts(db: Session) -> int:
-    """Count administrators so the two-account limit is enforced server-side."""
-    return db.query(User).filter(func.lower(User.role) == "admin").count()
+    """Count real administrators; the demo account does not consume a slot."""
+    return (
+        db.query(User)
+        .filter(
+            func.lower(User.role) == "admin",
+            func.lower(User.email) != DEMO_ADMIN_EMAIL,
+        )
+        .count()
+    )
 
 
 def is_valid_email_address(email: str) -> bool:
@@ -1331,11 +1357,15 @@ def ensure_transaction_bir_columns():
         "pwd_discount": "DECIMAL(12,2) NULL",
         "other_discount": "DECIMAL(12,2) NULL",
         "net_sales": "DECIMAL(12,2) NULL",
+        "owner_admin_id": "INT NULL",
     }
     with engine.begin() as conn:
         for name, definition in columns.items():
             if not conn.execute(text(f"SHOW COLUMNS FROM transactions LIKE '{name}'")).first():
                 conn.execute(text(f"ALTER TABLE transactions ADD COLUMN {name} {definition}"))
+        if conn.execute(text("SHOW TABLES LIKE 'transaction_void_requests'")).first():
+            if not conn.execute(text("SHOW COLUMNS FROM transaction_void_requests LIKE 'owner_admin_id'")).first():
+                conn.execute(text("ALTER TABLE transaction_void_requests ADD COLUMN owner_admin_id INT NULL"))
         request_columns = {
             "adjustment_type": "VARCHAR(32) NULL",
             "old_quantity": "INT NULL",
@@ -1383,6 +1413,18 @@ def ensure_user_role_column():
         added_by_column = conn.execute(text("SHOW COLUMNS FROM medicines LIKE 'added_by'")).first()
         if not added_by_column:
             conn.execute(text("ALTER TABLE medicines ADD COLUMN added_by INT NULL, ADD CONSTRAINT fk_added_by FOREIGN KEY (added_by) REFERENCES users(id)"))
+
+        owner_admin_column = conn.execute(text("SHOW COLUMNS FROM medicines LIKE 'owner_admin_id'")).first()
+        if not owner_admin_column:
+            conn.execute(text("ALTER TABLE medicines ADD COLUMN owner_admin_id INT NULL"))
+            conn.execute(text("CREATE INDEX ix_medicines_owner_admin_id ON medicines (owner_admin_id)"))
+
+        for table in ("categories", "suppliers"):
+            if conn.execute(text("SHOW TABLES LIKE :table_name"), {"table_name": table}).first():
+                owner_column = conn.execute(text(f"SHOW COLUMNS FROM `{table}` LIKE 'owner_admin_id'")).first()
+                if not owner_column:
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN owner_admin_id INT NULL"))
+                    conn.execute(text(f"CREATE INDEX ix_{table}_owner_admin_id ON `{table}` (owner_admin_id)"))
 
         reorder_level_column = conn.execute(text("SHOW COLUMNS FROM medicines LIKE 'reorder_level'")).first()
         if not reorder_level_column:
@@ -1862,10 +1904,12 @@ def ensure_user_role_column():
 
 
 def seed_data():
+    if not SEED_DEMO_DATA:
+        return
+
     db = SessionLocal()
     try:
-        # No default admin account is seeded anymore. The first admin account is created through signup.
-        # Medicines
+        # Demo data is opt-in. The first admin account is created through signup.
         if db.query(Medicine).count() == 0:
             medicines = [
                 Medicine(name="Amoxicillin 500mg", category="Antibiotic", stock=44, reorder_level=50, expiry=datetime.strptime("2026-04-10","%Y-%m-%d").date(), avg_daily_sales=6, unit_price=18.0),
@@ -2010,9 +2054,13 @@ def populate_medicine_computed_fields(med, new_arrival_ids):
 
 @app.get("/inventory", response_model=List[MedicineResponse])
 @app.get("/medicines", response_model=List[MedicineResponse])
-def list_inventory(db: Session = Depends(get_db)):
+def list_inventory(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     seven_days_ago = datetime.now() - timedelta(days=7)
-    medicines = db.query(Medicine).all()
+    query = db.query(Medicine)
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(Medicine.owner_admin_id == owner_id)
+    medicines = query.all()
     new_arrival_ids = {
         med.id
         for med in medicines
@@ -2030,30 +2078,40 @@ def list_inventory(db: Session = Depends(get_db)):
     return medicines
 
 @app.get("/sales/overview")
-def sales_overview(db: Session = Depends(get_db)):
+def sales_overview(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     now = datetime.now()
     today = now.date()
     week_start = today - timedelta(days=now.weekday())
     month_start = now.replace(day=1)
 
+    owner_id = data_owner_id(current_user)
+    sales_scope = SalesTransaction.medicine_id.in_(
+        db.query(Medicine.id).filter(Medicine.owner_admin_id == owner_id)
+    ) if owner_id is not None else True
+
     today_sales = db.query(func.sum(SalesTransaction.total)).filter(
+        sales_scope,
         func.date(SalesTransaction.transaction_date) == today
     ).scalar() or 0
 
     week_sales = db.query(func.sum(SalesTransaction.total)).filter(
+        sales_scope,
         func.date(SalesTransaction.transaction_date) >= week_start
     ).scalar() or 0
 
     month_sales = db.query(func.sum(SalesTransaction.total)).filter(
+        sales_scope,
         func.date(SalesTransaction.transaction_date) >= month_start
     ).scalar() or 0
 
     avg_basket = db.query(func.avg(SalesTransaction.total)).filter(
+        sales_scope,
         func.date(SalesTransaction.transaction_date) >= month_start
     ).scalar() or 0
 
-    month_target = 180000.0
-    month_over_month = 0.05  # 5% growth demo
+    is_demo = is_demo_admin(current_user)
+    month_target = 180000.0 if is_demo else 0.0
+    month_over_month = 0.05 if is_demo else 0.0
     monthly_forecast = month_sales * 1.1
 
     series = [
@@ -2072,7 +2130,7 @@ def sales_overview(db: Session = Depends(get_db)):
         "month_over_month": month_over_month * 100,
         "monthly_forecast": monthly_forecast,
         "series": series,
-        "demand_spotlight": {
+        "demand_spotlight": ({
             "year": now.year,
             "current_leader": {
                 "medicine_id": 1,
@@ -2101,7 +2159,12 @@ def sales_overview(db: Session = Depends(get_db)):
                 "source": "ML model"
             },
             "source": "internal analytics"
-        }
+        } if is_demo else {
+            "year": now.year,
+            "current_leader": None,
+            "predicted_leader": None,
+            "source": "No data available"
+        })
     }
 
 def generate_product_code(db: Session) -> str:
@@ -2276,6 +2339,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         reorder_level=medicine.reorder_level or 10,
         avg_daily_sales=medicine.avg_daily_sales or 1.0,
         added_by=current_user.id,
+        owner_admin_id=data_owner_id(current_user),
         assigned_staff=medicine.assigned_staff,
         is_new_arrival=False,
         product_code=prod_code,
@@ -2375,7 +2439,11 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
 
 @app.put("/medicines/{medicine_id}", response_model=MedicineResponse)
 def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    med = db.query(Medicine).filter(Medicine.id == medicine_id).first()
+    query = db.query(Medicine).filter(Medicine.id == medicine_id)
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(Medicine.owner_admin_id == owner_id)
+    med = query.first()
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
     
@@ -2601,8 +2669,12 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
     return med
 
 @app.get("/medicines/{medicine_id}", response_model=MedicineResponse)
-def get_medicine(medicine_id: int, db: Session = Depends(get_db)):
-    med = db.query(Medicine).filter(Medicine.id == medicine_id).first()
+def get_medicine(medicine_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    query = db.query(Medicine).filter(Medicine.id == medicine_id)
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(Medicine.owner_admin_id == owner_id)
+    med = query.first()
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
         
@@ -2614,7 +2686,11 @@ def get_medicine(medicine_id: int, db: Session = Depends(get_db)):
 
 @app.delete("/medicines/{medicine_id}")
 def delete_medicine(medicine_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    med = db.query(Medicine).filter(Medicine.id == medicine_id).first()
+    query = db.query(Medicine).filter(Medicine.id == medicine_id)
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(Medicine.owner_admin_id == owner_id)
+    med = query.first()
     if not med:
         raise HTTPException(status_code=404, detail="Medicine not found")
 
@@ -3176,12 +3252,11 @@ def review_price_update_request(
 
 @app.get("/staff", response_model=List[StaffResponse])
 def list_staff(db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
-    users = (
-        db.query(User)
-        .filter(User.role == "staff")
-        .order_by(User.full_name.asc())
-        .all()
-    )
+    query = db.query(User).filter(User.role == "staff")
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(User.created_by_admin == owner_id)
+    users = query.order_by(User.full_name.asc()).all()
     return [build_staff_response(user) for user in users]
 
 @app.post("/staff", response_model=StaffResponse)
@@ -3412,8 +3487,7 @@ def login(form_data: LoginRequest, request_obj: Request = None):
             record_attempt(normalized_email, ip, success=True, db=db)
             
             # If admin, enforce OTP (unless in skip list)
-            skip_otp_emails = {'jeremiassalvador@five-l'}
-            if normalize_user_role(user.role) == "admin" and normalized_email not in skip_otp_emails:
+            if normalize_user_role(user.role) == "admin":
                 otp_code = generate_reset_code()
                 expires_at = datetime.now() + timedelta(minutes=5)
 
@@ -3627,10 +3701,14 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
     try:
         today = datetime.now().date()
         thirty_days_ago = datetime.now() - timedelta(days=30)
+        owner_id = data_owner_id(current_user)
+        medicine_query = db.query(Medicine)
+        if owner_id is not None:
+            medicine_query = medicine_query.filter(Medicine.owner_admin_id == owner_id)
 
         # Derive medicine-level expiry from the actual per-batch expiry dates
         # before calculating dashboard counts and panels.
-        dashboard_medicines = db.query(Medicine).all()
+        dashboard_medicines = medicine_query.all()
         dashboard_arrivals = {
             med.id for med in dashboard_medicines
             if med.created_at and med.created_at >= datetime.now() - timedelta(days=7)
@@ -3655,14 +3733,26 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 nearing_expiry_meds.append(med)
 
         # 2. Staff contributions
-        staff_users = db.query(User).filter(User.role == "staff").all()
+        staff_query = db.query(User).filter(User.role == "staff")
+        if owner_id is not None:
+            staff_query = staff_query.filter(User.created_by_admin == owner_id)
+        staff_users = staff_query.all()
         total_medicines_by_staff = []
         for s in staff_users:
-            cnt = db.query(Medicine).filter(Medicine.added_by == s.id).count()
+            staff_medicine_query = db.query(Medicine).filter(Medicine.added_by == s.id)
+            if owner_id is not None:
+                staff_medicine_query = staff_medicine_query.filter(Medicine.owner_admin_id == owner_id)
+            cnt = staff_medicine_query.count()
             total_medicines_by_staff.append({"staff_name": s.full_name, "email": s.email, "count": cnt})
 
+        scoped_emails = [current_user.email]
+        scoped_emails.extend(s.email for s in staff_users if s.email)
+
         # 3. Most active staff
-        active_logs = db.query(MedicineAuditLog).filter(MedicineAuditLog.timestamp >= thirty_days_ago).all()
+        active_logs_query = db.query(MedicineAuditLog).filter(MedicineAuditLog.timestamp >= thirty_days_ago)
+        if owner_id is not None:
+            active_logs_query = active_logs_query.filter(MedicineAuditLog.performed_by.in_(scoped_emails))
+        active_logs = active_logs_query.all()
         activity_count = {}
         for log in active_logs:
             if log.role == "staff":
@@ -3678,7 +3768,10 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
         # 4. Recent activities panel (Requirement 5)
         recent_activities = []
-        activities = db.query(MedicineAuditLog).order_by(MedicineAuditLog.timestamp.desc()).limit(15).all()
+        activities_query = db.query(MedicineAuditLog).order_by(MedicineAuditLog.timestamp.desc())
+        if owner_id is not None:
+            activities_query = activities_query.filter(MedicineAuditLog.performed_by.in_(scoped_emails))
+        activities = activities_query.limit(15).all()
         for act in activities:
             recent_activities.append({
                 "id": act.id,
@@ -3693,7 +3786,10 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
         # 5. Inventory Timeline (Requirement 11)
         timeline = []
-        movements = db.query(StockMovement).order_by(StockMovement.created_at.desc()).limit(20).all()
+        movements_query = db.query(StockMovement).join(Medicine, Medicine.id == StockMovement.medicine_id)
+        if owner_id is not None:
+            movements_query = movements_query.filter(Medicine.owner_admin_id == owner_id)
+        movements = movements_query.order_by(StockMovement.created_at.desc()).limit(20).all()
         for mv in movements:
             med = db.query(Medicine).filter(Medicine.id == mv.medicine_id).first()
             med_name = med.name if med else f"Medicine #{mv.medicine_id}"
@@ -3705,7 +3801,10 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "timestamp": mv.created_at.isoformat()
             })
 
-        sales = db.query(SalesTransaction).order_by(SalesTransaction.transaction_date.desc()).limit(20).all()
+        sales_query = db.query(SalesTransaction).join(Medicine, Medicine.id == SalesTransaction.medicine_id)
+        if owner_id is not None:
+            sales_query = sales_query.filter(Medicine.owner_admin_id == owner_id)
+        sales = sales_query.order_by(SalesTransaction.transaction_date.desc()).limit(20).all()
         for s in sales:
             med = db.query(Medicine).filter(Medicine.id == s.medicine_id).first()
             med_name = med.name if med else f"Medicine #{s.medicine_id}"
@@ -3722,7 +3821,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
         # 6. Expiration panel detail
         expiration_panel = []
-        for m in db.query(Medicine).order_by(Medicine.expiry.asc()).all():
+        for m in medicine_query.order_by(Medicine.expiry.asc()).all():
             if m.expiry:
                 days_left = (m.expiry - today).days
                 config = get_inventory_alert_config(db, m.dosage_form)
@@ -3755,7 +3854,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
         # 8. All medicines detail for admin
         all_medicines_with_meta = []
-        for m in db.query(Medicine).all():
+        for m in dashboard_medicines:
             added_user = db.query(User).filter(User.id == m.added_by).first()
             updated_user = db.query(User).filter(User.id == m.updated_by).first()
             assigned_user = db.query(User).filter(User.id == m.assigned_staff).first()
@@ -3797,7 +3896,10 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
 @app.get("/admin/alerts")
 def get_admin_alerts(db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
-    alerts = db.query(AdminAlert).order_by(AdminAlert.created_at.desc()).limit(50).all()
+    if is_demo_admin(current_user):
+        alerts = db.query(AdminAlert).order_by(AdminAlert.created_at.desc()).limit(50).all()
+    else:
+        alerts = []
     return [{
         "id": a.id,
         "alert_type": a.alert_type,
@@ -3808,7 +3910,11 @@ def get_admin_alerts(db: Session = Depends(get_db), current_user: User = Depends
 
 @app.put("/admin/alerts/{alert_id}/read")
 def mark_alert_as_read(alert_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
-    alert = db.query(AdminAlert).filter(AdminAlert.id == alert_id).first()
+    alert_query = db.query(AdminAlert).filter(AdminAlert.id == alert_id)
+    if not is_demo_admin(current_user):
+        # Real admins never receive the demo alert stream.
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert = alert_query.first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     alert.is_read = True
@@ -3817,7 +3923,10 @@ def mark_alert_as_read(alert_id: int, db: Session = Depends(get_db), current_use
 
 @app.get("/medicine-audit-logs")
 def get_medicine_audit_logs(db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
-    logs = db.query(MedicineAuditLog).order_by(MedicineAuditLog.timestamp.desc()).all()
+    logs_query = db.query(MedicineAuditLog).order_by(MedicineAuditLog.timestamp.desc())
+    if not is_demo_admin(current_user):
+        logs_query = logs_query.filter(MedicineAuditLog.performed_by == current_user.email)
+    logs = logs_query.all()
     return [{
         "id": l.id,
         "action_type": l.action_type,
