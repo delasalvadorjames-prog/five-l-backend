@@ -463,14 +463,13 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=3,              # Bawasan para sa Hostinger shared hosting limits
-    max_overflow=2,           # Bawasan ang overflow
-    pool_timeout=60,          # Taasan ang pool timeout
+    pool_size=10,             # 3 → 10 (mas maraming persistent connections)
+    max_overflow=10,          # 2 → 10 (mas maraming overflow)
+    pool_timeout=120,         # 60 → 120 (mas mahabang hintay)
     connect_args={
-        # ✅ Taasan ang timeouts para sa high-latency remote connection
-        "connect_timeout": 60,      # 10s → 60s
-        "read_timeout": 120,        # 30s → 120s (2 minutes)
-        "write_timeout": 120,       # 30s → 120s
+        "connect_timeout": 60,
+        "read_timeout": 120,
+        "write_timeout": 120,
         "charset": "utf8mb4",
         "init_command": "SET SESSION wait_timeout=28800, SESSION interactive_timeout=28800",
     },
