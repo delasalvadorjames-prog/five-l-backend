@@ -50,9 +50,12 @@ except ImportError:
 # -------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    on_startup()
+    # ✅ Patakbuhin ang startup sa background — hindi mag-block sa Render
+    asyncio.create_task(asyncio.to_thread(on_startup))
 
     async def keep_alive():
+        # Hintayin ng 30s bago magsimula — para tapos na ang startup
+        await asyncio.sleep(30)
         while True:
             try:
                 with engine.connect() as conn:
@@ -61,7 +64,7 @@ async def lifespan(app: FastAPI):
                 print("Database keep-alive: OK")
             except Exception as exc:
                 print(f"Database keep-alive error: {exc}")
-            await asyncio.sleep(240)   # 180 → 240 seconds
+            await asyncio.sleep(240)
 
     task = asyncio.create_task(keep_alive())
     try:
