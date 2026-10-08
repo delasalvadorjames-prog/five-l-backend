@@ -466,8 +466,8 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=10,             # 3 → 10 (mas maraming persistent connections)
-    max_overflow=10,          # 2 → 10 (mas maraming overflow)
+    pool_size=20,             # 3 → 10 (mas maraming persistent connections)
+    max_overflow=20,          # 2 → 10 (mas maraming overflow)
     pool_timeout=120,         # 60 → 120 (mas mahabang hintay)
     connect_args={
         "connect_timeout": 60,
