@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
                 print("Database keep-alive: OK")
             except Exception as exc:
                 print(f"Database keep-alive error: {exc}")
-            await asyncio.sleep(180)
+            await asyncio.sleep(240)   # 180 → 240 seconds
 
     task = asyncio.create_task(keep_alive())
     try:
@@ -195,7 +195,16 @@ def create_database_if_missing() -> None:
         return
 
     server_url = build_mysql_server_url()
-    temp_engine = create_engine(server_url, pool_pre_ping=True, pool_recycle=3600)
+    temp_engine = create_engine(
+        server_url,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        connect_args={
+            "connect_timeout": 60,   # ✅ Dagdag na timeout
+            "read_timeout": 60,
+            "write_timeout": 60,
+        },
+    )
     try:
         with temp_engine.connect() as conn:
             conn.execute(
@@ -454,16 +463,19 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=5,
-    max_overflow=10,
-    pool_timeout=30,
+    pool_size=3,              # Bawasan para sa Hostinger shared hosting limits
+    max_overflow=2,           # Bawasan ang overflow
+    pool_timeout=60,          # Taasan ang pool timeout
     connect_args={
-        "connect_timeout": 10,
-        "read_timeout": 30,
-        "write_timeout": 30,
+        # ✅ Taasan ang timeouts para sa high-latency remote connection
+        "connect_timeout": 60,      # 10s → 60s
+        "read_timeout": 120,        # 30s → 120s (2 minutes)
+        "write_timeout": 120,       # 30s → 120s
+        "charset": "utf8mb4",
         "init_command": "SET SESSION wait_timeout=28800, SESSION interactive_timeout=28800",
     },
 )
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
