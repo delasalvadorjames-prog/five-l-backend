@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Union
 from urllib.parse import quote_plus, urlparse
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, Boolean, ForeignKey, func, Index, UniqueConstraint, text
-from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship, selectinload
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, and_
 
@@ -458,9 +458,12 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=40,             # ✅ 40 persistent
-    max_overflow=40,          # ✅ 40 overflow (total: 80)
-    pool_timeout=120,
+    # Keep the pool within the connection limits of a small Railway/MySQL
+    # deployment. A very large pool makes requests wait for MySQL and can
+    # turn a short query into a 1–3 minute timeout.
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=15,
     connect_args={
         "connect_timeout": 60,
         "read_timeout": 120,
@@ -994,7 +997,7 @@ def write_audit_log(db: Session, event_type: str, email: Optional[str] = None,
         print(f"[AUDIT LOG ERROR] {exc}")
         db.rollback()
 
-def write_medicine_audit_log(db: Session, action_type: str, medicine_name: str, performed_by: str, role: str, old_value: Optional[str] = None, new_value: Optional[str] = None) -> None:
+def write_medicine_audit_log(db: Session, action_type: str, medicine_name: str, performed_by: str, role: str, old_value: Optional[str] = None, new_value: Optional[str] = None, commit: bool = True) -> None:
     try:
         log = MedicineAuditLog(
             action_type=action_type,
@@ -1005,12 +1008,13 @@ def write_medicine_audit_log(db: Session, action_type: str, medicine_name: str, 
             new_value=new_value
         )
         db.add(log)
-        db.commit()
+        if commit:
+            db.commit()
     except Exception as exc:
         print(f"[MEDICINE AUDIT LOG ERROR] {exc}")
         db.rollback()
 
-def create_admin_alert(db: Session, alert_type: str, message: str) -> None:
+def create_admin_alert(db: Session, alert_type: str, message: str, commit: bool = True) -> None:
     try:
         alert = AdminAlert(
             alert_type=alert_type,
@@ -1018,7 +1022,8 @@ def create_admin_alert(db: Session, alert_type: str, message: str) -> None:
             is_read=False
         )
         db.add(alert)
-        db.commit()
+        if commit:
+            db.commit()
     except Exception as exc:
         print(f"[ADMIN ALERT ERROR] {exc}")
         db.rollback()
@@ -1979,7 +1984,9 @@ def list_inventory(db: Session = Depends(get_db), current_user: User = Depends(g
     owner_id = data_owner_id(current_user)
     if owner_id is not None:
         query = query.filter(Medicine.owner_admin_id == owner_id)
-    medicines = query.all()
+    # Loading supplies in one additional query avoids one database round-trip
+    # per medicine when FastAPI serializes the response.
+    medicines = query.options(selectinload(Medicine.supplies)).all()
     new_arrival_ids = {
         med.id
         for med in medicines
@@ -2296,8 +2303,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     )
 
     db.add(new_med)
-    db.commit()
-    db.refresh(new_med)
+    db.flush()
 
     qty = medicine.quantity if medicine.quantity is not None else medicine.stock
     exp_str = medicine.expiry_date or medicine.expiry
@@ -2332,10 +2338,9 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         selling_price=selling_price
     )
     db.add(new_supply)
-    db.commit()
+    db.flush()
 
     sync_inventory_batch_for_supply(db, new_med, new_supply)
-    db.commit()
 
     new_val_str = f"Product Code: {prod_code}, Name: {formatted_name}, Category: {category}, Initial Stock: {qty}, Expiry: {expiry_date}"
     write_medicine_audit_log(
@@ -2345,7 +2350,8 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         current_user.email,
         current_user.role,
         old_value=None,
-        new_value=new_val_str
+        new_value=new_val_str,
+        commit=False
     )
 
     if qty > 0:
@@ -2357,18 +2363,19 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
 
     if qty <= low_stock_threshold:
         msg = f"Low stock alert: {new_med.name} was added with stock {qty}"
-        create_admin_alert(db, "LOW_STOCK", msg)
-        write_medicine_audit_log(db, "low stock alerts", new_med.name, current_user.email, current_user.role, old_value=None, new_value=f"Stock: {qty}")
+        create_admin_alert(db, "LOW_STOCK", msg, commit=False)
+        write_medicine_audit_log(db, "low stock alerts", new_med.name, current_user.email, current_user.role, old_value=None, new_value=f"Stock: {qty}", commit=False)
 
     today = datetime.now().date()
     if expiry_date < today:
         msg = f"Expired medicine added: {new_med.name} (Expired on {expiry_date})"
-        create_admin_alert(db, "EXPIRING", msg)
-        write_medicine_audit_log(db, "expired medicines", new_med.name, current_user.email, current_user.role, old_value=None, new_value=f"Expiry: {expiry_date}")
+        create_admin_alert(db, "EXPIRING", msg, commit=False)
+        write_medicine_audit_log(db, "expired medicines", new_med.name, current_user.email, current_user.role, old_value=None, new_value=f"Expiry: {expiry_date}", commit=False)
     elif expiry_date <= today + timedelta(days=expiry_alert_days):
         msg = f"Medicine nearing expiration: {new_med.name} (Expires on {expiry_date})"
-        create_admin_alert(db, "EXPIRING", msg)
+        create_admin_alert(db, "EXPIRING", msg, commit=False)
 
+    db.commit()
     db.refresh(new_med)
     populate_medicine_computed_fields(new_med, {new_med.id} if new_med.is_new_arrival else set())
     return new_med
@@ -2724,18 +2731,14 @@ def add_supply_batch(
         selling_price=selling_price
     )
     db.add(new_supply)
-    db.commit()
-    db.refresh(new_supply)
+    db.flush()
 
     sync_inventory_batch_for_supply(db, med, new_supply)
-    db.commit()
 
     sm = StockMovement(medicine_id=medicine_id, type='STOCK_IN', quantity=supply.quantity)
     db.add(sm)
     med.last_restocked_at = datetime.now()
-    db.commit()
-
-    db.refresh(med)
+    db.flush()
     populate_medicine_computed_fields(med, {medicine_id})
 
     write_medicine_audit_log(
@@ -2745,15 +2748,19 @@ def add_supply_batch(
         current_user.email,
         current_user.role,
         old_value=None,
-        new_value=f"Added batch '{batch_num}' with qty {supply.quantity}, expiry {expiry_date}"
+        new_value=f"Added batch '{batch_num}' with qty {supply.quantity}, expiry {expiry_date}",
+        commit=False
     )
 
     today = datetime.now().date()
     if expiry_date < today:
-        create_admin_alert(db, "EXPIRING", f"Expired batch added for {med.name}: {batch_num} (expired {expiry_date})")
+        create_admin_alert(db, "EXPIRING", f"Expired batch added for {med.name}: {batch_num} (expired {expiry_date})", commit=False)
     elif expiry_date <= today + timedelta(days=60):
-        create_admin_alert(db, "EXPIRING", f"Batch nearing expiry for {med.name}: {batch_num} (expires {expiry_date})")
+        create_admin_alert(db, "EXPIRING", f"Batch nearing expiry for {med.name}: {batch_num} (expires {expiry_date})", commit=False)
 
+    db.commit()
+    db.refresh(med)
+    populate_medicine_computed_fields(med, {medicine_id})
     return med
 
 
