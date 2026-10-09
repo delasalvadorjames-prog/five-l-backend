@@ -1924,6 +1924,11 @@ def format_medicine_name(base_name: str, dosage_form: str = "Tablet", strength: 
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
+def normalize_variant_token(value: Optional[str]) -> str:
+    """Normalize variant values so 500 mg and 500mg cannot be duplicated."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+
+
 def get_inventory_alert_config(db: Session, dosage_form: Optional[str]):
     normalized = (dosage_form or '').strip()
     if not normalized:
@@ -2247,6 +2252,29 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
     base_unit = medicine.base_unit or "pcs"
     purchase_unit = medicine.purchase_unit or medicine.unit_type or "pcs"
     conversion_factor = max(1, int(medicine.conversion_factor or 1))
+
+    # Staff and administrators use the same inventory. Prevent duplicate
+    # variants at the API boundary even if the client-side form is bypassed.
+    requested_base = normalize_variant_token(med_name)
+    requested_form = normalize_variant_token(dosage_form)
+    requested_classification = normalize_variant_token(classification)
+    requested_strength = normalize_variant_token(strength)
+    requested_volume = normalize_variant_token(volume)
+    for existing in db.query(Medicine).all():
+        if bool(existing.is_archived):
+            continue
+        existing_base = normalize_variant_token(existing.medicine_name or existing.name)
+        if (
+            existing_base == requested_base
+            and normalize_variant_token(existing.dosage_form) == requested_form
+            and normalize_variant_token(existing.classification or "Generic") == requested_classification
+            and normalize_variant_token(existing.strength) == requested_strength
+            and normalize_variant_token(existing.volume) == requested_volume
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This medicine variant already exists. Add stock from Inventory instead.",
+            )
 
     prod_code = generate_product_code(db)
 
@@ -3602,7 +3630,10 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         if owner_id is not None:
             medicine_query = medicine_query.filter(Medicine.owner_admin_id == owner_id)
 
-        dashboard_medicines = medicine_query.limit(100).all()
+        # Dashboard totals and alert counts must represent the complete
+        # inventory. The previous 100-row cap made the dashboard disagree
+        # with Inventory when the database contained more than 100 medicines.
+        dashboard_medicines = medicine_query.all()
         dashboard_arrivals = {
             med.id for med in dashboard_medicines
             if med.created_at and med.created_at >= datetime.now() - timedelta(days=7)
