@@ -900,6 +900,7 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
             raise HTTPException(status_code=500, detail=f"Email error: {exc}")
     # ============ END RESEND API ============
 
+    # ... (iwan ang SMTP fallback)
     # ============ SMTP FALLBACK (kung walang Resend key) ============
     if not SMTP_HOST:
         if EMAIL_DEV_FALLBACK:
