@@ -458,12 +458,9 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    # Keep the pool within the connection limits of a small Railway/MySQL
-    # deployment. A very large pool makes requests wait for MySQL and can
-    # turn a short query into a 1–3 minute timeout.
-    pool_size=5,
-    max_overflow=5,
-    pool_timeout=15,
+    pool_size=15,             # ← 15 persistent connections
+    max_overflow=10,          # ← 10 overflow (total: 25)
+    pool_timeout=60,          # ← 60 segundo hintay (imbes na 120)
     connect_args={
         "connect_timeout": 60,
         "read_timeout": 120,
