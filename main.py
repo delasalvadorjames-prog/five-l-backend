@@ -466,9 +466,9 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=20,             # 3 → 10 (mas maraming persistent connections)
-    max_overflow=20,          # 2 → 10 (mas maraming overflow)
-    pool_timeout=120,         # 60 → 120 (mas mahabang hintay)
+    pool_size=40,             # ✅ 40 persistent
+    max_overflow=40,          # ✅ 40 overflow (total: 80)
+    pool_timeout=120,
     connect_args={
         "connect_timeout": 60,
         "read_timeout": 120,
@@ -477,7 +477,6 @@ engine = create_engine(
         "init_command": "SET SESSION wait_timeout=28800, SESSION interactive_timeout=28800",
     },
 )
-
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -3603,7 +3602,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         if owner_id is not None:
             medicine_query = medicine_query.filter(Medicine.owner_admin_id == owner_id)
 
-        dashboard_medicines = medicine_query.all()
+        dashboard_medicines = medicine_query.limit(100).all()
         dashboard_arrivals = {
             med.id for med in dashboard_medicines
             if med.created_at and med.created_at >= datetime.now() - timedelta(days=7)
