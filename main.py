@@ -873,6 +873,43 @@ def build_email_error_detail(exc: Exception) -> str:
     return f"Unable to send reset code: {exc}"
 
 def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
+    # ============ RESEND API (PRIMARY) ============
+    import httpx
+    resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
+    
+    if resend_api_key:
+        try:
+            response = httpx.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {resend_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": "Five-L Pharmacy <onboarding@resend.dev>",
+                    "to": [recipient_email],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=30.0,
+            )
+            if response.status_code in (200, 201):
+                print(f"[RESEND] ✅ Email sent to {recipient_email}")
+                return
+            else:
+                print(f"[RESEND ERROR] {response.status_code}: {response.text}")
+                raise HTTPException(status_code=500, detail=f"Resend error: {response.text}")
+        except httpx.TimeoutException:
+            print(f"[RESEND ERROR] Timeout sending to {recipient_email}")
+            raise HTTPException(status_code=500, detail="Email service timeout")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"[RESEND ERROR] {exc}")
+            raise HTTPException(status_code=500, detail=f"Email error: {exc}")
+    # ============ END RESEND API ============
+
+    # ============ SMTP FALLBACK (kung walang Resend key) ============
     if not SMTP_HOST:
         if EMAIL_DEV_FALLBACK:
             print(f"[DEV] Email to {recipient_email}:\n{body}")
@@ -897,6 +934,8 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
                 print(f"[DEV] Email content:\n{body}")
                 return
             raise HTTPException(status_code=500, detail=f"Unable to send email: {exc}")
+
+    # ... (iwan ang natitirang SMTP fallback code kung meron pa)
 
     message = EmailMessage()
     message["Subject"] = subject
