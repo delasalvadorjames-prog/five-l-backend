@@ -458,9 +458,10 @@ engine = create_engine(
     MYSQL_URL,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=15,             # ← 15 persistent connections
-    max_overflow=10,          # ← 10 overflow (total: 25)
-    pool_timeout=60,          # ← 60 segundo hintay (imbes na 120)
+    # Keep one bounded pool for the API process. Tune per deployment via env.
+    pool_size=read_int_env("DB_POOL_SIZE", 5),
+    max_overflow=read_int_env("DB_MAX_OVERFLOW", 5),
+    pool_timeout=read_int_env("DB_POOL_TIMEOUT", 15),
     connect_args={
         "connect_timeout": 60,
         "read_timeout": 120,
@@ -864,6 +865,50 @@ def build_email_error_detail(exc: Exception) -> str:
     return f"Unable to send reset code: {exc}"
 
 def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
+    # ============ RESEND API (PRIMARY) ============
+    import httpx
+    resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
+    
+    if resend_api_key:
+        try:
+            response = httpx.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {resend_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": "Five-L Pharmacy <onboarding@resend.dev>",
+                    "to": [recipient_email],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=15.0,
+            )
+            if response.status_code in (200, 201):
+                print(f"[RESEND] ✅ Email sent to {recipient_email}")
+                return
+            else:
+                print(f"[RESEND ERROR] {response.status_code}: {response.text}")
+                raise HTTPException(status_code=500, detail=f"Resend error: {response.text}")
+        except httpx.TimeoutException:
+            print(f"[RESEND ERROR] Timeout sending to {recipient_email}")
+            raise HTTPException(status_code=500, detail="Email service timeout")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"[RESEND ERROR] {exc}")
+            raise HTTPException(status_code=500, detail=f"Email error: {exc}")
+    # ============ END RESEND API ============
+
+    # SMTP FALLBACK (kung walang Resend key)
+    if not SMTP_HOST:
+        if EMAIL_DEV_FALLBACK:
+            print(f"[DEV] Email to {recipient_email}:\n{body}")
+            return
+        raise HTTPException(status_code=500, detail="SMTP host is not configured.")
+
+    # ... (iwan ang SMTP code) # 
     # ============ RESEND API (PRIMARY) ============
     import httpx
     resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
