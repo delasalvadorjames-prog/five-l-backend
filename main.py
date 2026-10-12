@@ -908,7 +908,7 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
             return
         raise HTTPException(status_code=500, detail="SMTP host is not configured.")
 
-    # ... (iwan ang SMTP code) # 
+    # ... (iwan ang natitirang SMTP code)
     # ============ RESEND API (PRIMARY) ============
     import httpx
     resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
