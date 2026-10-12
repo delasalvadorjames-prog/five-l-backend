@@ -878,7 +878,7 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "from": "Five-L Pharmacy <onboarding@resend.dev>",
+                    "from": "Five-L Pharmacy <noreply@fivelpharmacy.com>",
                     "to": [recipient_email],
                     "subject": subject,
                     "text": body,
