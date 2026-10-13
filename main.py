@@ -3766,6 +3766,19 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         sales_query = db.query(SalesTransaction).join(Medicine, Medicine.id == SalesTransaction.medicine_id)
         if owner_id is not None:
             sales_query = sales_query.filter(Medicine.owner_admin_id == owner_id)
+        all_sales = sales_query.all()
+        today_sales = sum(float(s.total or 0) for s in all_sales if s.transaction_date and s.transaction_date.date() == today)
+        today_transaction_count = sum(1 for s in all_sales if s.transaction_date and s.transaction_date.date() == today)
+        sales_by_month = {}
+        for sale in all_sales:
+            if not sale.transaction_date:
+                continue
+            month_key = sale.transaction_date.strftime("%Y-%m")
+            sales_by_month[month_key] = sales_by_month.get(month_key, 0) + float(sale.total or 0)
+        sales_series = [
+            {"label": datetime.strptime(month_key, "%Y-%m").strftime("%b %y"), "value": round(value, 2)}
+            for month_key, value in sorted(sales_by_month.items())
+        ]
         sales = sales_query.order_by(SalesTransaction.transaction_date.desc()).limit(20).all()
         for s in sales:
             med = db.query(Medicine).filter(Medicine.id == s.medicine_id).first()
@@ -3842,6 +3855,9 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
             "low_stock_count": len(low_stock_meds),
             "expired_count": len(expired_meds),
             "nearing_expiry_count": len(nearing_expiry_meds),
+            "today_sales": round(today_sales, 2),
+            "today_transaction_count": today_transaction_count,
+            "sales_series": sales_series,
             "total_medicines_by_staff": total_medicines_by_staff,
             "most_active_staff": most_active_staff,
             "recent_activities": recent_activities,
