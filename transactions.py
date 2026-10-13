@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date, timezone
 from typing import List, Optional
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import (
     create_engine,
@@ -257,10 +257,11 @@ def gen_txn_number() -> str:
 
 @router.get("/transactions", response_model=List[TransactionOut])
 def list_transactions(
+    response: Response,
+    current_user=Depends(get_transaction_user),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=500),
     search: Optional[str] = None,
-    current_user=Depends(get_transaction_user),
 ):
     db = SessionLocal()
     try:
@@ -274,6 +275,7 @@ def list_transactions(
         if search:
             term = f"%{search}%"
             q = q.filter(or_(Transaction.transaction_number.like(term), Transaction.medicine_name.like(term), Transaction.customer_name.like(term)))
+        response.headers["X-Total-Count"] = str(q.order_by(None).count())
         offset = (page - 1) * size
         rows = q.offset(offset).limit(size).all()
         return rows
