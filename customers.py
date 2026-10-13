@@ -5,8 +5,8 @@ from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, text
+from sqlalchemy.orm import declarative_base
 
 
 def build_mysql_url() -> str:
@@ -18,8 +18,8 @@ def build_mysql_url() -> str:
     return f"mysql+pymysql://{auth}@{host}:{port}/{os.getenv('DB_NAME', 'five-l')}"
 
 
-engine = create_engine(build_mysql_url(), pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+# Reuse the bounded pool owned by main.py.
+from main import engine, SessionLocal
 Base = declarative_base()
 
 

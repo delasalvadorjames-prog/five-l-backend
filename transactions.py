@@ -29,6 +29,9 @@ def get_mysql_db_name() -> str:
 
 
 def build_mysql_url() -> str:
+    explicit_url = os.getenv("MYSQL_URL")
+    if explicit_url:
+        return explicit_url
     host = os.getenv("DB_HOST", "127.0.0.1")
     port = os.getenv("DB_PORT", "3306")
     user = os.getenv("DB_USER", "root")
@@ -71,8 +74,9 @@ def create_database_if_missing() -> None:
 
 MYSQL_URL = build_mysql_url()
 create_database_if_missing()
-engine = create_engine(MYSQL_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+# Reuse the engine owned by main.py so this router does not create another
+# independent connection pool.
+from main import engine, SessionLocal
 Base = declarative_base()
 
 
@@ -436,8 +440,7 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
             owner_admin_id=data_owner_id(current_user),
         )
         db.add(txn)
-        db.commit()
-        db.refresh(txn)
+        db.flush()
         response_payload = {
             "id": txn.id,
             "transaction_number": txn.transaction_number,
@@ -479,7 +482,9 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
         # Audit log
         detail = f"Transaction {txn.transaction_number} added: medicine_id={txn.medicine_id} qty={txn.quantity} total={txn.total_amount} cashier={txn.cashier_name}"
         db.execute(text("INSERT INTO audit_logs (event_type, detail, created_at) VALUES (:et, :dt, NOW())"), {"et": "TRANSACTION_ADDED", "dt": detail})
+        # Commit the stock deduction, transaction, and audit row together.
         db.commit()
+        db.refresh(txn)
         return response_payload
     except HTTPException:
         db.rollback()

@@ -43,8 +43,9 @@ def build_mysql_url() -> str:
     return f"mysql://{auth}@{host}:{port}/{db_name}"
 
 
-engine = create_engine(build_mysql_url(), pool_pre_ping=True, pool_recycle=3600)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+# Reuse the engine owned by main.py so this router does not create another
+# independent connection pool.
+from main import engine, SessionLocal
 Base = declarative_base()
 router = APIRouter(tags=["FIFO Inventory"])
 

@@ -8,8 +8,7 @@ from typing import List, Optional
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Header, Query
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 
 # ---------------------------------------------------------------------------
 # DB Setup (mirrors main.py pattern)
@@ -29,8 +28,8 @@ def _build_url() -> str:
     return f"mysql+pymysql://{auth}@{host}:{port}/{db_name}"
 
 
-_engine       = create_engine(_build_url(), pool_pre_ping=True, pool_recycle=3600)
-_SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+# Reuse the bounded pool owned by main.py.
+from main import SessionLocal as _SessionLocal
 
 def _db():
     s = _SessionLocal()
