@@ -482,11 +482,34 @@ async def delete_category(
 @router.get("/suppliers", response_model=List[SupplierResponse])
 async def get_suppliers(
     db: Session = Depends(get_db),
-    current_user = Depends(require_admin_user)
+    current_user = Depends(get_current_user)
 ):
-    """Get all suppliers"""
+    """Get the suppliers belonging to the current admin's workspace.
+
+    Staff accounts need read-only access to the same supplier catalog when
+    adding or restocking medicines; create/update/delete remain admin-only.
+    """
     try:
         owner_sql, owner_params = _owner_scope(current_user, "s.")
+
+        # Legacy/demo supplier rows may have a NULL owner_admin_id. Staff
+        # accounts still need to read those shared catalog rows, in addition
+        # to suppliers explicitly owned by their workspace.
+        if (getattr(current_user, "role", "staff") or "staff").lower() == "staff":
+            from main import User, data_owner_id, is_demo_admin
+            staff_owner_id = data_owner_id(current_user)
+            owner_admin = db.query(User).filter(User.id == staff_owner_id).first()
+
+            # The demo admin owns the shared catalog. Some supplier rows were
+            # created before owner_admin_id was introduced, while newer rows
+            # may carry the demo admin's id. Both must be visible to staff
+            # accounts created by the demo admin.
+            if is_demo_admin(owner_admin):
+                owner_sql = ""
+                owner_params = {}
+            else:
+                owner_sql = " AND (s.owner_admin_id IS NULL OR s.owner_admin_id = :owner_admin_id)"
+                owner_params = {"owner_admin_id": staff_owner_id}
         suppliers_data = db.execute(text(f"""
             SELECT s.supplier_id as id, s.supplier_name as name, 
                    s.contact_person, s.email, s.phone, s.address,

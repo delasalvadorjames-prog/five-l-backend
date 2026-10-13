@@ -529,7 +529,15 @@ def request_transaction_void(txn_id: int, payload: VoidRequestCreate, current_us
     try:
         if (getattr(current_user, "role", "staff") or "staff").lower() != "staff":
             raise HTTPException(status_code=400, detail="Administrators can void transactions directly")
-        txn_row = db.query(Transaction).filter(Transaction.id == txn_id).first()
+        from main import data_owner_id
+        owner_id = data_owner_id(current_user)
+        txn_query = db.query(Transaction).filter(
+            Transaction.id == txn_id,
+            Transaction.cashier_name == current_user.email,
+        )
+        if owner_id is not None:
+            txn_query = txn_query.filter(Transaction.owner_admin_id == owner_id)
+        txn_row = txn_query.first()
         if not txn_row:
             raise HTTPException(status_code=404, detail="Transaction not found")
         existing = db.query(TransactionVoidRequest).filter(
