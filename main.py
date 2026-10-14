@@ -247,6 +247,7 @@ SMTP_PORT = read_int_env("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
 SMTP_PASSWORD = normalize_smtp_password(SMTP_HOST, os.getenv("SMTP_PASSWORD", ""))
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "no-reply@five-l.local").strip()
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@fivelpharmacy.com").strip()
 SMTP_USE_TLS = read_bool_env("SMTP_USE_TLS", True)
 SMTP_USE_SSL = read_bool_env("SMTP_USE_SSL", False)
 SMTP_TIMEOUT = read_int_env("SMTP_TIMEOUT", 20)
@@ -879,7 +880,7 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "from": "Five-L Pharmacy <noreply@fivelpharmacy.com>",
+                    "from": f"Five-L Pharmacy <{EMAIL_FROM}>",
                     "to": [recipient_email],
                     "subject": subject,
                     "text": body,
@@ -923,7 +924,7 @@ def send_mail_message(recipient_email: str, subject: str, body: str) -> None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "from": "Five-L Pharmacy <noreply@fivelpharmacy.com>",
+                    "from": f"Five-L Pharmacy <{EMAIL_FROM}>",
                     "to": [recipient_email],
                     "subject": subject,
                     "text": body,
@@ -1020,6 +1021,19 @@ def send_login_otp_email(recipient_email: str, full_name: str, otp_code: str) ->
         "If you did not attempt to log in, you can ignore this email.\n"
     )
     send_mail_message(recipient_email, "Five L Pharmacy Login Verification Code", body)
+
+
+def send_staff_credentials_email(recipient_email: str, full_name: str, temporary_password: str) -> None:
+    body = (
+        f"Hello {full_name or recipient_email},\n\n"
+        "A Five L Pharmacy staff account has been created for you.\n\n"
+        f"Login email: {recipient_email}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        "Use these credentials at the Five L Pharmacy login page. "
+        "Please keep this message private and contact your administrator "
+        "if you need your password reset.\n"
+    )
+    send_mail_message(recipient_email, "Your Five L Pharmacy staff account", body)
 
 UNAUTHORIZED_DETAIL = "Unauthorized account access"
 
@@ -3231,13 +3245,15 @@ def create_staff(
     if not full_name:
         raise HTTPException(status_code=400, detail="Staff name is required")
     if not identifier:
-        raise HTTPException(status_code=400, detail="Staff username is required")
+        raise HTTPException(status_code=400, detail="Staff email is required")
+    if not is_valid_email_address(identifier):
+        raise HTTPException(status_code=400, detail="Please provide a valid staff email address")
     if not assigned_category:
         raise HTTPException(status_code=400, detail="Assigned category is required")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Staff password must be at least 6 characters long")
     if db.query(User).filter(User.email == identifier).first():
-        raise HTTPException(status_code=400, detail="Staff username already exists")
+        raise HTTPException(status_code=400, detail="Staff email is already registered")
 
     staff_user = User(
         full_name=full_name,
@@ -3249,6 +3265,19 @@ def create_staff(
         created_by_admin=current_user.id
     )
     db.add(staff_user)
+    db.flush()
+    # Only finish creating the account after the recipient email has been
+    # accepted by the configured mail provider. This prevents staff accounts
+    # from being activated without giving the staff member their credentials.
+    try:
+        send_staff_credentials_email(identifier, full_name, password)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Unable to send staff credentials email: {exc}")
+
     db.commit()
     db.refresh(staff_user)
     write_audit_log(db, "STAFF_CREATED", identifier, detail=f"Created by admin {current_user.email}")
@@ -3440,43 +3469,40 @@ def login(form_data: LoginRequest, request_obj: Request = None):
         if verify_password(form_data.password, user.password_hash):
             record_attempt(normalized_email, ip, success=True, db=db)
 
-            if normalize_user_role(user.role) == "admin":
-                otp_code = generate_reset_code()
-                expires_at = datetime.now() + timedelta(minutes=5)
+            # Both admins and staff must complete email OTP verification
+            # before a session token is issued.
+            otp_code = generate_reset_code()
+            expires_at = datetime.now() + timedelta(minutes=5)
 
-                db.query(LoginOTPToken).filter(
-                    LoginOTPToken.email == normalized_email,
-                    LoginOTPToken.used_at.is_(None),
-                ).delete(synchronize_session=False)
+            db.query(LoginOTPToken).filter(
+                LoginOTPToken.email == normalized_email,
+                LoginOTPToken.used_at.is_(None),
+            ).delete(synchronize_session=False)
 
-                db.add(LoginOTPToken(
-                    email=normalized_email,
+            db.add(LoginOTPToken(
+                email=normalized_email,
+                otp_code=otp_code,
+                used_at=None,
+                expires_at=expires_at,
+            ))
+            db.commit()
+            try:
+                send_login_otp_email(
+                    recipient_email=normalized_email,
+                    full_name=user.full_name or user.email,
                     otp_code=otp_code,
-                    used_at=None,
-                    expires_at=expires_at,
-                ))
-                db.commit()
-                try:
-                    send_login_otp_email(
-                        recipient_email=normalized_email,
-                        full_name=user.full_name or user.email,
-                        otp_code=otp_code,
-                    )
-                except HTTPException:
-                    raise
-                except Exception as exc:
-                    print(f"[SMTP ERROR] {exc}")
-                    raise HTTPException(status_code=500, detail=f"Failed to send OTP: {exc}")
-
-                return LoginOTPRequiredResponse(
-                    requires_otp=True,
-                    email=normalized_email,
-                    message="OTP sent to your email."
                 )
-            else:
-                user.last_login = datetime.now()
-                db.commit()
-                return build_auth_response_with_session(user, db)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                print(f"[SMTP ERROR] {exc}")
+                raise HTTPException(status_code=500, detail=f"Failed to send OTP: {exc}")
+
+            return LoginOTPRequiredResponse(
+                requires_otp=True,
+                email=normalized_email,
+                message="OTP sent to your email."
+            )
         else:
             record_attempt(normalized_email, ip, success=False, db=db)
     finally:
@@ -3521,6 +3547,7 @@ def verify_login_otp(payload: LoginOTPVerifyRequest):
             raise HTTPException(status_code=400, detail="Invalid OTP")
 
         otp_record.used_at = datetime.now()
+        user.last_login = datetime.now()
         db.commit()
 
         return build_auth_response_with_session(user, db)
