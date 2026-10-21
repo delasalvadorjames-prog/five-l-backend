@@ -319,10 +319,10 @@ class Medicine(Base):
     avg_daily_sales = Column(Float, nullable=True)
     unit_price = Column(Float, nullable=True)
     supplier = Column(String(200), nullable=True)
-    added_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+    added_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     owner_admin_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
-    updated_by = Column(Integer, ForeignKey('users.id'), nullable=True)
-    assigned_staff = Column(Integer, ForeignKey('users.id'), nullable=True)
+    updated_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    assigned_staff = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     last_restocked_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -676,6 +676,9 @@ class LoginOTPVerifyRequest(BaseModel):
     email: str
     code: str
 
+class LoginOTPResendRequest(BaseModel):
+    email: str
+
 class StaffResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -700,6 +703,10 @@ class StaffPermissionsUpdate(BaseModel):
 class StaffPasswordReset(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128)
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
 class StaffAssignmentUpdate(BaseModel):
     assigned_category: str
 
@@ -711,6 +718,11 @@ class StaffCreate(BaseModel):
     identifier: str
     password: Optional[str] = None
     assigned_category: str
+
+class AdminCreate(BaseModel):
+    full_name: str
+    identifier: str
+    password: str
 
 class GoogleAuthRequest(BaseModel):
     code: str
@@ -1227,6 +1239,23 @@ def get_me(current_user: User = Depends(get_current_user)):
         "can_adjust_inventory": bool(current_user.can_adjust_inventory),
         "can_approve_voids": bool(current_user.can_approve_voids),
     }
+
+@app.put("/auth/password/change")
+def change_current_user_password(
+    payload: PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=400, detail="New password must be different from the current password")
+
+    current_user.password_hash = get_password_hash(payload.new_password)
+    db.commit()
+    write_audit_log(db, "PASSWORD_CHANGED", current_user.email, detail="Password changed by the account owner")
+    return {"message": "Password changed successfully"}
 
 # -------------------
 # Database init & seed
@@ -1861,6 +1890,33 @@ def ensure_user_role_column():
         if not assigned_staff_column:
             conn.execute(text("ALTER TABLE medicines ADD COLUMN assigned_staff INT NULL, ADD CONSTRAINT fk_assigned_staff FOREIGN KEY (assigned_staff) REFERENCES users(id)"))
 
+        # Keep user deletion safe for existing databases as well as fresh schemas.
+        # Medicine history remains intact; only the optional user references are cleared.
+        dependent_user_columns = ("added_by", "updated_by", "assigned_staff")
+        foreign_keys = conn.execute(text("""
+            SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, rc.DELETE_RULE
+            FROM information_schema.KEY_COLUMN_USAGE AS kcu
+            JOIN information_schema.REFERENTIAL_CONSTRAINTS AS rc
+              ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+             AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+             AND rc.TABLE_NAME = kcu.TABLE_NAME
+            WHERE kcu.TABLE_SCHEMA = DATABASE()
+              AND kcu.TABLE_NAME = 'medicines'
+              AND kcu.REFERENCED_TABLE_NAME = 'users'
+              AND kcu.COLUMN_NAME IN ('added_by', 'updated_by', 'assigned_staff')
+        """)).fetchall()
+        for constraint_name, column_name, delete_rule in foreign_keys:
+            if delete_rule == 'SET NULL':
+                continue
+            if column_name not in dependent_user_columns:
+                continue
+            safe_constraint = str(constraint_name).replace('`', '``')
+            conn.execute(text(f"ALTER TABLE medicines DROP FOREIGN KEY `{safe_constraint}`"))
+            conn.execute(text(
+                f"ALTER TABLE medicines ADD CONSTRAINT `{safe_constraint}` "
+                f"FOREIGN KEY (`{column_name}`) REFERENCES users(id) ON DELETE SET NULL"
+            ))
+
         updated_at_column = conn.execute(text("SHOW COLUMNS FROM medicines LIKE 'updated_at'")).first()
         if not updated_at_column:
             conn.execute(text("ALTER TABLE medicines ADD COLUMN updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
@@ -2279,6 +2335,26 @@ def sync_inventory_batch_for_supply(db: Session, med: Medicine, supply: Medicine
         {"medicine_id": med.id, "quantity": int(supply.quantity or 0)},
     )
 
+
+@app.get("/sales/history")
+def sales_history(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    query = db.query(SalesTransaction).join(Medicine, Medicine.id == SalesTransaction.medicine_id)
+    owner_id = data_owner_id(current_user)
+    if owner_id is not None:
+        query = query.filter(Medicine.owner_admin_id == owner_id)
+
+    transactions = query.order_by(SalesTransaction.transaction_date.desc()).all()
+    return [{
+        "id": f"SALE-{sale.id}",
+        "units": int(sale.quantity or 0),
+        "total": float(sale.total or 0),
+        "timestamp": sale.transaction_date.isoformat() if sale.transaction_date else None,
+        "items": [{
+            "medicineId": sale.medicine_id,
+            "quantity": int(sale.quantity or 0),
+            "unitPrice": float(sale.unit_price or 0),
+        }],
+    } for sale in transactions]
 
 @app.post("/medicines", response_model=MedicineResponse)
 def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -3283,6 +3359,43 @@ def create_staff(
     write_audit_log(db, "STAFF_CREATED", identifier, detail=f"Created by admin {current_user.email}")
     return build_staff_response(staff_user)
 
+@app.post("/staff/admin", response_model=StaffResponse)
+def create_admin(
+    payload: AdminCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    """Create the second administrator; role assignment is never accepted from the client."""
+    if count_admin_accounts(db) >= MAX_ADMIN_ACCOUNTS:
+        raise HTTPException(status_code=403, detail="The maximum of 2 administrator accounts has been reached.")
+
+    full_name = payload.full_name.strip()
+    identifier = normalize_email(payload.identifier)
+    password = payload.password.strip()
+    if not full_name:
+        raise HTTPException(status_code=400, detail="Admin name is required")
+    if not is_valid_email_address(identifier):
+        raise HTTPException(status_code=400, detail="Please provide a valid admin email address")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Admin password must be at least 8 characters long")
+    if db.query(User).filter(func.lower(User.email) == identifier).first():
+        raise HTTPException(status_code=400, detail="This email is already registered")
+
+    admin_user = User(
+        full_name=full_name,
+        email=identifier,
+        password_hash=get_password_hash(password),
+        role="admin",
+        assigned_category=None,
+        account_status="active",
+        created_by_admin=current_user.id,
+    )
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+    write_audit_log(db, "ADMIN_CREATED", identifier, detail=f"Created by admin {current_user.email}")
+    return build_staff_response(admin_user)
+
 @app.put("/staff/{staff_id}/assignment", response_model=StaffResponse)
 def update_staff_assignment(
     staff_id: int,
@@ -3511,6 +3624,53 @@ def login(form_data: LoginRequest, request_obj: Request = None):
         except Exception as close_exc:
             print(f"[WARN] Failed to close DB session: {close_exc}")
     raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+@app.post("/login/resend")
+def resend_login_otp(payload: LoginOTPResendRequest):
+    normalized_email = normalize_email(payload.email)
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == normalized_email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        if normalize_user_role(user.role) != "admin":
+            status_val = getattr(user, "account_status", "active") or "active"
+            if status_val != "active":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Account is {status_val}")
+
+        otp_code = generate_reset_code()
+        expires_at = datetime.now() + timedelta(minutes=5)
+        db.query(LoginOTPToken).filter(
+            LoginOTPToken.email == normalized_email,
+            LoginOTPToken.used_at.is_(None),
+        ).delete(synchronize_session=False)
+        db.add(LoginOTPToken(
+            email=normalized_email,
+            otp_code=otp_code,
+            used_at=None,
+            expires_at=expires_at,
+        ))
+        db.commit()
+
+        try:
+            send_login_otp_email(
+                recipient_email=normalized_email,
+                full_name=user.full_name or user.email,
+                otp_code=otp_code,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"[SMTP ERROR] {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to send OTP: {exc}")
+
+        return {"message": "A new verification code was sent to your email."}
+    finally:
+        db.close()
 
 @app.post("/login/verify", response_model=LoginResponse)
 def verify_login_otp(payload: LoginOTPVerifyRequest):
@@ -3939,6 +4099,18 @@ def get_medicine_audit_logs(db: Session = Depends(get_db), current_user: User = 
         "old_value": l.old_value,
         "new_value": l.new_value
     } for l in logs]
+
+@app.get("/audit-logs")
+def get_audit_logs(db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):
+    logs = db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(500).all()
+    return [{
+        "id": log.id,
+        "event_type": log.event_type,
+        "email": log.email,
+        "ip_address": log.ip_address,
+        "detail": log.detail,
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+    } for log in logs]
 
 @app.delete("/audit-logs")
 def delete_audit_logs(current_user: User = Depends(get_current_user)):
