@@ -740,6 +740,9 @@ class PasswordResetConfirmRequest(BaseModel):
     code: str
     new_password: str
 
+class PasswordResetConfirmResponse(BaseModel):
+    message: str
+
 class SetupStatusResponse(BaseModel):
     has_admin: bool
     setup_required: bool
@@ -3746,7 +3749,7 @@ def request_password_reset(payload: PasswordResetRequest):
         except Exception as close_exc:
             print(f"[WARN] Failed to close DB session: {close_exc}")
 
-@app.post("/auth/password-reset/confirm", response_model=LoginResponse)
+@app.post("/auth/password-reset/confirm", response_model=PasswordResetConfirmResponse)
 def confirm_password_reset(payload: PasswordResetConfirmRequest):
     normalized_email = normalize_email(payload.email)
     reset_code = payload.code.strip()
@@ -3787,7 +3790,7 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest):
         db.commit()
 
         write_audit_log(db, "PASSWORD_RESET", normalized_email)
-        return build_auth_response_with_session(user, db)
+        return PasswordResetConfirmResponse(message="Password updated successfully. Please sign in with your new password.")
     finally:
         try:
             db.close()
