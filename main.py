@@ -17,7 +17,7 @@ from urllib.parse import quote_plus, urlparse
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, Boolean, ForeignKey, func, Index, UniqueConstraint, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship, selectinload
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, or_
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -2051,7 +2051,31 @@ def list_inventory(db: Session = Depends(get_db), current_user: User = Depends(g
     query = db.query(Medicine)
     owner_id = data_owner_id(current_user)
     if owner_id is not None:
-        query = query.filter(Medicine.owner_admin_id == owner_id)
+        # Staff share the administrator's inventory. Include legacy rows with
+        # no owner_admin_id only in the staff member's assigned categories,
+        # so older admin-created medicines remain visible to staff without
+        # crossing pharmacy ownership boundaries.
+        if normalize_user_role(getattr(current_user, "role", None)) == "staff":
+            assigned_categories = [
+                value.strip().lower()
+                for value in (current_user.assigned_category or "").split(",")
+                if value.strip()
+            ]
+            legacy_scope = and_(
+                Medicine.owner_admin_id.is_(None),
+                func.lower(Medicine.category).in_(assigned_categories),
+            ) if assigned_categories else False
+            # Older staff accounts may not have created_by_admin populated.
+            # In that case the account belongs to the shared legacy dataset;
+            # keep the existing UI category filter responsible for what the
+            # staff member can work with.
+            if getattr(current_user, "created_by_admin", None):
+                query = query.filter(or_(
+                    Medicine.owner_admin_id == owner_id,
+                    legacy_scope,
+                ))
+        else:
+            query = query.filter(Medicine.owner_admin_id == owner_id)
     # Loading supplies in one additional query avoids one database round-trip
     # per medicine when FastAPI serializes the response.
     medicines = query.options(selectinload(Medicine.supplies)).all()
