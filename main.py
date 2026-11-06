@@ -4,6 +4,7 @@ import csv
 import io
 import os
 import random
+import secrets
 import re
 import smtplib
 import uuid
@@ -722,7 +723,7 @@ class StaffCreate(BaseModel):
 class AdminCreate(BaseModel):
     full_name: str
     identifier: str
-    password: str
+    password: Optional[str] = None
 
 class GoogleAuthRequest(BaseModel):
     code: str
@@ -831,17 +832,19 @@ def build_auth_response(user: User) -> LoginResponse:
         can_approve_voids=bool(user.can_approve_voids),
     )
 
-def build_auth_response_with_session(user: User, db: Session) -> LoginResponse:
+def build_auth_response_with_session(user: User, db: Session, ip_address: Optional[str] = None) -> LoginResponse:
     role = normalize_user_role(user.role)
     assigned_category = (user.assigned_category or "").strip() or None
     access_token = create_access_token(data={"sub": user.email, "role": role, "assigned_category": assigned_category})
     if role == "admin":
-        store_active_session(user.email, access_token, db)
-        write_audit_log(db, "SESSION_CREATED", user.email, detail="New admin session issued")
+        store_active_session(user.email, access_token, db, ip_address=ip_address)
+        write_audit_log(db, "SESSION_CREATED", user.email, ip_address=ip_address,
+                        detail="New admin session issued")
     else:
         user.active_token = access_token
         db.commit()
-        write_audit_log(db, "SESSION_CREATED", user.email, detail="New staff session issued")
+        write_audit_log(db, "SESSION_CREATED", user.email, ip_address=ip_address,
+                        detail="New staff session issued")
     return LoginResponse(
         access_token=access_token,
         token_type="bearer",
@@ -1005,6 +1008,18 @@ def send_staff_credentials_email(recipient_email: str, full_name: str, temporary
     )
     send_mail_message(recipient_email, "Your Five L Pharmacy staff account", body)
 
+
+def send_admin_credentials_email(recipient_email: str, full_name: str, temporary_password: str) -> None:
+    body = (
+        f"Hello {full_name or recipient_email},\n\n"
+        "A Five L Pharmacy administrator account has been created for you.\n\n"
+        f"Login email: {recipient_email}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        "Use these credentials at the Five L Pharmacy login page. "
+        "Please keep this message private and change your password after signing in.\n"
+    )
+    send_mail_message(recipient_email, "Your Five L Pharmacy administrator account", body)
+
 UNAUTHORIZED_DETAIL = "Unauthorized account access"
 
 def check_allowed_email(email: str) -> None:
@@ -1102,11 +1117,30 @@ def record_attempt(email: str, ip: str, success: bool, db: Session) -> None:
     create_admin_alert(db, "FAILED_LOGIN", f"Failed login attempt for {email} from IP {ip} ({record.attempt_count}/{MAX_LOGIN_ATTEMPTS})")
 
 
-def store_active_session(email: str, token: str, db: Session) -> None:
+def get_client_ip(request: Optional[Request]) -> str:
+    """Return the real client IP, including when the API is behind a proxy."""
+    if request is None:
+        return "unknown"
+
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        first_forwarded_ip = forwarded_for.split(",", 1)[0].strip()
+        if first_forwarded_ip:
+            return first_forwarded_ip
+
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+
+    return request.client.host if request.client else "unknown"
+
+
+def store_active_session(email: str, token: str, db: Session, ip_address: Optional[str] = None) -> None:
     expires_at = datetime.now() + timedelta(hours=JWT_EXPIRES_HOURS)
     existing = db.query(ActiveAdminSession).filter(ActiveAdminSession.email == email).first()
     if existing:
-        write_audit_log(db, "SESSION_INVALIDATED", email, detail="Previous session replaced by new login")
+        write_audit_log(db, "SESSION_INVALIDATED", email, ip_address=ip_address,
+                        detail="Previous session replaced by new login")
         existing.token = token
         existing.created_at = datetime.now()
         existing.expires_at = expires_at
@@ -3353,13 +3387,12 @@ def create_admin(
 
     full_name = payload.full_name.strip()
     identifier = normalize_email(payload.identifier)
-    password = payload.password.strip()
+    # Generate the temporary admin password on the server and send it by email.
+    password = secrets.token_urlsafe(12)
     if not full_name:
         raise HTTPException(status_code=400, detail="Admin name is required")
     if not is_valid_email_address(identifier):
         raise HTTPException(status_code=400, detail="Please provide a valid admin email address")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Admin password must be at least 8 characters long")
     if db.query(User).filter(func.lower(User.email) == identifier).first():
         raise HTTPException(status_code=400, detail="This email is already registered")
 
@@ -3373,6 +3406,16 @@ def create_admin(
         created_by_admin=current_user.id,
     )
     db.add(admin_user)
+    db.flush()
+    try:
+        send_admin_credentials_email(identifier, full_name, password)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Unable to send admin credentials email: {exc}")
+
     db.commit()
     db.refresh(admin_user)
     write_audit_log(db, "ADMIN_CREATED", identifier, detail=f"Created by admin {current_user.email}")
@@ -3538,7 +3581,7 @@ def login(form_data: LoginRequest, request_obj: Request = None):
     try:
         login_identifier = form_data.userstaff or form_data.email or ""
         normalized_email = normalize_email(login_identifier)
-        ip = "unknown"
+        ip = get_client_ip(request_obj)
 
         if not normalized_email:
             raise HTTPException(status_code=400, detail="Username is required")
@@ -3655,9 +3698,10 @@ def resend_login_otp(payload: LoginOTPResendRequest):
         db.close()
 
 @app.post("/login/verify", response_model=LoginResponse)
-def verify_login_otp(payload: LoginOTPVerifyRequest):
+def verify_login_otp(payload: LoginOTPVerifyRequest, request_obj: Request = None):
     normalized_email = normalize_email(payload.email)
     otp_code = payload.code.strip()
+    ip = get_client_ip(request_obj)
 
     db = SessionLocal()
     try:
@@ -3685,14 +3729,15 @@ def verify_login_otp(payload: LoginOTPVerifyRequest):
         if otp_record.expires_at < datetime.now():
             raise HTTPException(status_code=400, detail="OTP has expired")
         if otp_record.otp_code != otp_code:
-            write_audit_log(db, "OTP_FAILED", normalized_email, detail="Wrong OTP entered")
+            write_audit_log(db, "OTP_FAILED", normalized_email, ip_address=ip,
+                            detail="Wrong OTP entered")
             raise HTTPException(status_code=400, detail="Invalid OTP")
 
         otp_record.used_at = datetime.now()
         user.last_login = datetime.now()
         db.commit()
 
-        return build_auth_response_with_session(user, db)
+        return build_auth_response_with_session(user, db, ip_address=ip)
     finally:
         try:
             db.close()
@@ -3798,7 +3843,7 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest):
             print(f"[WARN] Failed to close DB session: {close_exc}")
 
 @app.post("/auth/google", response_model=LoginResponse)
-def google_auth(payload: GoogleAuthRequest):
+def google_auth(payload: GoogleAuthRequest, request_obj: Request = None):
     db = SessionLocal()
     try:
         if payload.email:
@@ -3810,14 +3855,16 @@ def google_auth(payload: GoogleAuthRequest):
         user = db.query(User).filter(User.email == normalized_email).first()
         if not user:
             write_audit_log(db, "GOOGLE_AUTH_DENIED", normalized_email,
+                            ip_address=get_client_ip(request_obj),
                             detail="Google login attempted for non-existent account")
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Google account is not registered in the system")
 
         if normalize_user_role(user.role) != "admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrator accounts can use Google login")
 
-        write_audit_log(db, "GOOGLE_AUTH_SUCCESS", normalized_email)
-        return build_auth_response_with_session(user, db)
+        ip = get_client_ip(request_obj)
+        write_audit_log(db, "GOOGLE_AUTH_SUCCESS", normalized_email, ip_address=ip)
+        return build_auth_response_with_session(user, db, ip_address=ip)
     except HTTPException:
         raise
     except Exception as e:
