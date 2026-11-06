@@ -341,6 +341,11 @@ class Medicine(Base):
     purchase_unit = Column(String(50), nullable=False, server_default='pcs')
     conversion_factor = Column(Integer, nullable=False, server_default='1')
     is_archived = Column(Boolean, nullable=False, server_default='0')
+    is_promo = Column(Boolean, nullable=False, server_default='0')
+    promo_discount = Column(Float, nullable=False, server_default='0')
+    promo_label = Column(String(100), nullable=True)
+    promo_start_date = Column(Date, nullable=True)
+    promo_end_date = Column(Date, nullable=True)
 
     supplies = relationship("MedicineSupply", back_populates="medicine", cascade="all, delete-orphan")
 
@@ -607,6 +612,11 @@ class MedicineUpdate(BaseModel):
     base_unit: Optional[str] = None
     purchase_unit: Optional[str] = None
     conversion_factor: Optional[int] = None
+    is_promo: Optional[bool] = None
+    promo_discount: Optional[float] = None
+    promo_label: Optional[str] = None
+    promo_start_date: Optional[str] = None
+    promo_end_date: Optional[str] = None
 
 class MedicineResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -633,6 +643,11 @@ class MedicineResponse(BaseModel):
     low_stock_threshold: Optional[int] = None
     expiry_alert_days: Optional[int] = None
     strength: Optional[str] = None
+    is_promo: bool = False
+    promo_discount: float = 0
+    promo_label: Optional[str] = None
+    promo_start_date: Optional[date] = None
+    promo_end_date: Optional[date] = None
     volume: Optional[str] = None
     manufacturer: Optional[str] = None
     unit_type: str = 'pcs'
@@ -1296,6 +1311,11 @@ def ensure_inventory_schema_columns():
     migrations = {
         "medicines": {
             "is_archived": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "is_promo": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "promo_discount": "FLOAT NOT NULL DEFAULT 0",
+            "promo_label": "VARCHAR(100) NULL",
+            "promo_start_date": "DATE NULL",
+            "promo_end_date": "DATE NULL",
         },
         "medicine_supplies": {
             "received_date": "DATE NULL",
@@ -2663,8 +2683,10 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
                 setattr(med, field, value)
         elif field == "is_new_arrival" and value is not None:
             setattr(med, field, value)
-        elif field in ("medicine_name", "classification", "dosage_form", "strength", "volume", "manufacturer", "unit_type", "base_unit", "purchase_unit") and value is not None:
+        elif field in ("medicine_name", "classification", "dosage_form", "strength", "volume", "manufacturer", "unit_type", "base_unit", "purchase_unit", "is_promo", "promo_discount", "promo_label") and value is not None:
             setattr(med, field, value)
+        elif field in ("promo_start_date", "promo_end_date"):
+            setattr(med, field, datetime.strptime(value, "%Y-%m-%d").date() if value else None)
         elif field == "conversion_factor" and value is not None:
             med.conversion_factor = max(1, int(value))
 
@@ -3332,7 +3354,7 @@ def create_staff(
     identifier = normalize_email(payload.identifier)
     full_name = payload.full_name.strip()
     assigned_category = payload.assigned_category.strip()
-    password = (payload.password or "staff123").strip()
+    password = secrets.token_urlsafe(12)
 
     if not full_name:
         raise HTTPException(status_code=400, detail="Staff name is required")
@@ -3342,8 +3364,6 @@ def create_staff(
         raise HTTPException(status_code=400, detail="Please provide a valid staff email address")
     if not assigned_category:
         raise HTTPException(status_code=400, detail="Assigned category is required")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Staff password must be at least 6 characters long")
     if db.query(User).filter(User.email == identifier).first():
         raise HTTPException(status_code=400, detail="Staff email is already registered")
 
