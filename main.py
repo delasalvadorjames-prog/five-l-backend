@@ -2116,6 +2116,12 @@ def get_inventory_alert_config(db: Session, dosage_form: Optional[str]):
     ).first()
 
 
+def get_effective_low_stock_threshold(db: Session, medicine: Medicine) -> int:
+    """Use the configured alert threshold for the medicine's product type."""
+    config = get_inventory_alert_config(db, medicine.dosage_form)
+    return int(config.low_stock_threshold if config else 20)
+
+
 def get_inventory_alert_config_map(db: Session):
     return {
         row.dosage_form.strip().casefold(): row
@@ -2200,7 +2206,7 @@ def list_inventory(db: Session = Depends(get_db), current_user: User = Depends(g
     for med in medicines:
         populate_medicine_computed_fields(med, new_arrival_ids)
         config = config_map.get((med.dosage_form or '').strip().casefold())
-        med.low_stock_threshold = config.low_stock_threshold if config else None
+        med.low_stock_threshold = get_effective_low_stock_threshold(db, med)
         med.expiry_alert_days = config.expiry_alert_days if config else None
     return medicines
 
@@ -2720,7 +2726,7 @@ def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), cur
         new_med.is_new_arrival = True
 
     alert_config = get_inventory_alert_config(db, new_med.dosage_form)
-    low_stock_threshold = alert_config.low_stock_threshold if alert_config else (new_med.reorder_level or 10)
+    low_stock_threshold = get_effective_low_stock_threshold(db, new_med)
     expiry_alert_days = alert_config.expiry_alert_days if alert_config else 60
 
     if qty <= low_stock_threshold:
@@ -2948,7 +2954,7 @@ def update_medicine(medicine_id: int, updates: MedicineUpdate, db: Session = Dep
         )
 
     alert_config = get_inventory_alert_config(db, med.dosage_form)
-    low_stock_threshold = alert_config.low_stock_threshold if alert_config else (med.reorder_level or 10)
+    low_stock_threshold = get_effective_low_stock_threshold(db, med)
     expiry_alert_days = alert_config.expiry_alert_days if alert_config else 60
 
     if med.stock <= low_stock_threshold and old_stock > low_stock_threshold:
@@ -4118,8 +4124,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         expired_meds = []
         nearing_expiry_meds = []
         for med in dashboard_medicines:
-            config = get_inventory_alert_config(db, med.dosage_form)
-            low_threshold = config.low_stock_threshold if config else (med.reorder_level or 10)
+            low_threshold = get_effective_low_stock_threshold(db, med)
             expiry_days = config.expiry_alert_days if config else 60
             if (med.stock or 0) <= low_threshold:
                 low_stock_meds.append(med)
@@ -4243,8 +4248,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
 
         low_stock_panel = []
         for m in dashboard_medicines:
-            config = get_inventory_alert_config(db, m.dosage_form)
-            low_threshold = config.low_stock_threshold if config else (m.reorder_level or 10)
+            low_threshold = get_effective_low_stock_threshold(db, m)
             if m.stock > low_threshold + 10:
                 continue
             low_stock_panel.append({

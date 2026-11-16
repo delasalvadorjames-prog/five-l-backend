@@ -464,7 +464,11 @@ def get_inventory(
                 CASE
                     WHEN me.expiry IS NOT NULL AND DATE(me.expiry) < :today    THEN 'Expired'
                     WHEN COALESCE(inv.available_stock, 0) <= CASE WHEN LOWER(COALESCE(m.dosage_form, '')) IN ('other', 'others', 'medical supply', 'medical device') THEN :non_medicine_critical_stock_threshold ELSE :critical_stock_threshold END THEN 'Critical Stock'
-                    WHEN COALESCE(inv.available_stock, 0) <= CASE WHEN LOWER(COALESCE(m.dosage_form, '')) IN ('other', 'others', 'medical supply', 'medical device') THEN :non_medicine_low_stock_threshold ELSE :low_stock_threshold END THEN 'Low Stock'
+                    WHEN COALESCE(inv.available_stock, 0) <= CASE
+                        WHEN LOWER(COALESCE(m.dosage_form, '')) IN ('other', 'others', 'medical supply', 'medical device')
+                            THEN :non_medicine_low_stock_threshold
+                        ELSE :low_stock_threshold
+                    END THEN 'Low Stock'
                     WHEN me.expiry IS NOT NULL AND DATE(me.expiry) <= CASE WHEN LOWER(COALESCE(m.dosage_form, '')) IN ('other', 'others', 'medical supply', 'medical device') THEN :non_medicine_expiry_cutoff ELSE :expiry_cutoff END THEN 'Expiring Soon'
                     ELSE 'Healthy'
                 END                                                                  AS status,

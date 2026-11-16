@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, date, timezone
 from typing import List, Optional
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, ConfigDict
@@ -193,6 +194,7 @@ class TransactionCreate(BaseModel):
     pwd_discount: Optional[float] = None
     other_discount: Optional[float] = None
     net_sales: Optional[float] = None
+    created_at: Optional[datetime] = None
 
 
 class TransactionOut(BaseModel):
@@ -569,6 +571,15 @@ def create_transaction(payload: TransactionCreate, current_user=Depends(get_tran
             pwd_discount=pwd_discount,
             other_discount=payload.other_discount,
             net_sales=payload.net_sales,
+            # Keep the database record aligned with the timestamp shown on the
+            # live POS receipt. The client sends an ISO timestamp with the
+            # browser's local offset; store its Manila wall-clock value in the
+            # existing DATETIME column.
+            created_at=(
+                payload.created_at.astimezone(ZoneInfo("Asia/Manila")).replace(tzinfo=None)
+                if payload.created_at and payload.created_at.tzinfo
+                else payload.created_at
+            ),
             owner_admin_id=data_owner_id(current_user),
         )
         db.add(txn)
