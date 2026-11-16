@@ -413,6 +413,40 @@ class StockMovement(Base):
     quantity = Column(Integer)
     created_at = Column(DateTime, server_default=func.now())
 
+class PurchasePlan(Base):
+    __tablename__ = 'purchase_plans'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reference_number = Column(String(40), unique=True, index=True, nullable=False)
+    owner_admin_id = Column(Integer, nullable=True, index=True)
+    created_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_by_name = Column(String(255), nullable=True)
+    status = Column(String(40), nullable=False, default='Pending', server_default='Pending')
+    total_medicines = Column(Integer, nullable=False, default=0)
+    total_units = Column(Integer, nullable=False, default=0)
+    estimated_total_cost = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    items = relationship('PurchasePlanItem', back_populates='plan', cascade='all, delete-orphan')
+
+class PurchasePlanItem(Base):
+    __tablename__ = 'purchase_plan_items'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id = Column(Integer, ForeignKey('purchase_plans.id', ondelete='CASCADE'), nullable=False, index=True)
+    medicine_id = Column(Integer, ForeignKey('medicines.id', ondelete='RESTRICT'), nullable=False)
+    medicine_name = Column(String(200), nullable=False)
+    category = Column(String(100), nullable=True)
+    supplier = Column(String(200), nullable=True)
+    current_stock = Column(Integer, nullable=False, default=0)
+    average_daily_consumption = Column(Float, nullable=False, default=0.0)
+    days_remaining = Column(Float, nullable=True)
+    reorder_level = Column(Integer, nullable=False, default=0)
+    suggested_order_quantity = Column(Integer, nullable=False, default=0)
+    unit_cost = Column(Float, nullable=False, default=0.0)
+    total_cost = Column(Float, nullable=False, default=0.0)
+    priority = Column(String(20), nullable=False, default='Low')
+    reason = Column(Text, nullable=True)
+    plan = relationship('PurchasePlan', back_populates='items')
+
 class ActiveAdminSession(Base):
     __tablename__ = 'active_admin_sessions'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -768,6 +802,26 @@ class SetupStatusResponse(BaseModel):
 
 class PredictRequest(BaseModel):
     label_text: str = Field(..., min_length=3)
+
+class PurchasePlanItemCreate(BaseModel):
+    medicine_id: int
+    medicine_name: str = Field(..., min_length=1, max_length=200)
+    category: Optional[str] = None
+    supplier: Optional[str] = None
+    current_stock: int = Field(0, ge=0)
+    average_daily_consumption: float = Field(0, ge=0)
+    days_remaining: Optional[float] = Field(None, ge=0)
+    reorder_level: int = Field(0, ge=0)
+    suggested_order_quantity: int = Field(..., ge=0)
+    unit_cost: float = Field(0, ge=0)
+    priority: str = Field('Low', pattern='^(Critical|High|Medium|Low)$')
+    reason: Optional[str] = None
+
+class PurchasePlanCreate(BaseModel):
+    items: List[PurchasePlanItemCreate] = Field(..., min_length=1)
+
+class PurchasePlanStatusUpdate(BaseModel):
+    status: str = Field(..., pattern='^(Pending|Approved|Rejected|Converted to Purchase Order|Cancelled)$')
 
 class PredictResponse(BaseModel):
     predicted_category: str
@@ -2391,6 +2445,145 @@ def sales_history(db: Session = Depends(get_db), current_user: User = Depends(ge
             "unitPrice": float(sale.unit_price or 0),
         }],
     } for sale in transactions]
+
+def _purchase_plan_item_payload(item: PurchasePlanItem) -> dict:
+    return {
+        "id": item.id,
+        "medicine_id": item.medicine_id,
+        "medicine_name": item.medicine_name,
+        "category": item.category,
+        "supplier": item.supplier,
+        "current_stock": item.current_stock,
+        "average_daily_consumption": float(item.average_daily_consumption or 0),
+        "days_remaining": float(item.days_remaining) if item.days_remaining is not None else None,
+        "reorder_level": item.reorder_level,
+        "suggested_order_quantity": item.suggested_order_quantity,
+        "unit_cost": float(item.unit_cost or 0),
+        "total_cost": float(item.total_cost or 0),
+        "priority": item.priority,
+        "reason": item.reason,
+    }
+
+def _purchase_plan_payload(plan: PurchasePlan) -> dict:
+    return {
+        "id": plan.id,
+        "reference_number": plan.reference_number,
+        "status": plan.status,
+        "created_by": plan.created_by,
+        "created_by_name": plan.created_by_name,
+        "total_medicines": plan.total_medicines,
+        "total_units": plan.total_units,
+        "estimated_total_cost": float(plan.estimated_total_cost or 0),
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+        "items": [_purchase_plan_item_payload(item) for item in (plan.items or [])],
+    }
+
+@app.get("/purchase-plans")
+def list_purchase_plans(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    owner_id = data_owner_id(current_user)
+    query = db.query(PurchasePlan).options(selectinload(PurchasePlan.items)).order_by(PurchasePlan.created_at.desc(), PurchasePlan.id.desc())
+    if owner_id is not None:
+        query = query.filter(PurchasePlan.owner_admin_id == owner_id)
+    return [_purchase_plan_payload(plan) for plan in query.all()]
+
+@app.get("/purchase-plans/{plan_id}")
+def get_purchase_plan(plan_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    owner_id = data_owner_id(current_user)
+    query = db.query(PurchasePlan).options(selectinload(PurchasePlan.items)).filter(PurchasePlan.id == plan_id)
+    if owner_id is not None:
+        query = query.filter(PurchasePlan.owner_admin_id == owner_id)
+    plan = query.first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Purchase plan not found")
+    return _purchase_plan_payload(plan)
+
+@app.post("/purchase-plans", status_code=status.HTTP_201_CREATED)
+def create_purchase_plan(payload: PurchasePlanCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    owner_id = data_owner_id(current_user)
+    medicine_ids = {item.medicine_id for item in payload.items}
+    medicines_query = db.query(Medicine).filter(Medicine.id.in_(medicine_ids))
+    if owner_id is not None:
+        medicines_query = medicines_query.filter(Medicine.owner_admin_id == owner_id)
+    medicines = {medicine.id: medicine for medicine in medicines_query.all()}
+    if len(medicines) != len(medicine_ids):
+        raise HTTPException(status_code=400, detail="One or more medicines are unavailable")
+
+    safe_items = []
+    for item in payload.items:
+        quantity = int(item.suggested_order_quantity)
+        unit_cost = float(item.unit_cost or 0)
+        safe_items.append((item, quantity, unit_cost))
+
+    reference = f"PP-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    plan = PurchasePlan(
+        reference_number=reference,
+        owner_admin_id=owner_id,
+        created_by=current_user.id,
+        created_by_name=current_user.full_name or current_user.email,
+        # Admin-created plans are immediately ready for purchasing; they do not
+        # need to pass through an approval/rejection workflow.
+        status='Approved' if normalize_user_role(current_user.role) == 'admin' else 'Pending',
+        total_medicines=len(safe_items),
+        total_units=sum(quantity for _, quantity, _ in safe_items),
+        estimated_total_cost=sum(quantity * unit_cost for _, quantity, unit_cost in safe_items),
+    )
+    db.add(plan)
+    db.flush()
+    for item, quantity, unit_cost in safe_items:
+        medicine = medicines[item.medicine_id]
+        db.add(PurchasePlanItem(
+            plan_id=plan.id,
+            medicine_id=medicine.id,
+            medicine_name=medicine.name or item.medicine_name,
+            category=medicine.category or item.category,
+            supplier=medicine.supplier or item.supplier,
+            current_stock=item.current_stock,
+            average_daily_consumption=item.average_daily_consumption,
+            days_remaining=item.days_remaining,
+            reorder_level=item.reorder_level,
+            suggested_order_quantity=quantity,
+            unit_cost=unit_cost,
+            total_cost=quantity * unit_cost,
+            priority=item.priority,
+            reason=item.reason,
+        ))
+    db.commit()
+    db.refresh(plan)
+    return _purchase_plan_payload(plan)
+
+@app.patch("/purchase-plans/{plan_id}/status")
+def update_purchase_plan_status(plan_id: int, payload: PurchasePlanStatusUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    owner_id = data_owner_id(current_user)
+    query = db.query(PurchasePlan).filter(PurchasePlan.id == plan_id)
+    if owner_id is not None:
+        query = query.filter(PurchasePlan.owner_admin_id == owner_id)
+    plan = query.first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Purchase plan not found")
+    if payload.status in {'Approved', 'Rejected', 'Converted to Purchase Order'} and normalize_user_role(current_user.role) != 'admin':
+        raise HTTPException(status_code=403, detail="Only an administrator can approve or convert a purchase plan")
+    if plan.status != 'Pending' and payload.status not in {'Cancelled'}:
+        raise HTTPException(status_code=409, detail="Only pending purchase plans can change status")
+    plan.status = payload.status
+    db.commit()
+    db.refresh(plan)
+    return _purchase_plan_payload(plan)
+
+@app.delete("/purchase-plans/{plan_id}")
+def delete_purchase_plan(plan_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    owner_id = data_owner_id(current_user)
+    query = db.query(PurchasePlan).filter(PurchasePlan.id == plan_id)
+    if owner_id is not None:
+        query = query.filter(PurchasePlan.owner_admin_id == owner_id)
+    plan = query.first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Purchase plan not found")
+    if plan.status != 'Pending' and normalize_user_role(current_user.role) != 'admin':
+        raise HTTPException(status_code=409, detail="Only pending purchase plans can be deleted")
+    db.delete(plan)
+    db.commit()
+    return {"message": "Purchase plan deleted"}
 
 @app.post("/medicines", response_model=MedicineResponse)
 def create_medicine(medicine: MedicineCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -4119,6 +4312,7 @@ def get_admin_alerts(db: Session = Depends(get_db), current_user: User = Depends
         "created_at": a.created_at.isoformat(),
         "is_read": a.is_read
     } for a in alerts]
+
 
 @app.put("/admin/alerts/{alert_id}/read")
 def mark_alert_as_read(alert_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin_user)):

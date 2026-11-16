@@ -19,6 +19,7 @@ from sqlalchemy import (
     Boolean,
     and_,
     or_,
+    func,
     text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -279,6 +280,135 @@ def list_transactions(
         offset = (page - 1) * size
         rows = q.offset(offset).limit(size).all()
         return rows
+    finally:
+        db.close()
+
+
+@router.get("/transactions/seasonal-trends")
+def seasonal_medicine_trends(current_user=Depends(get_transaction_user)):
+    """Analyze real POS transactions by medicine and calendar month."""
+    db = SessionLocal()
+    try:
+        from main import Medicine, data_owner_id
+
+        owner_id = data_owner_id(current_user)
+        query = db.query(Transaction).filter(
+            ~func.lower(func.coalesce(Transaction.transaction_type, 'sale')).in_(
+                ('void', 'voided', 'cancelled', 'canceled', 'refund', 'refunded')
+            )
+        )
+        if owner_id is not None:
+            query = query.filter(Transaction.owner_admin_id == owner_id)
+
+        transactions = query.order_by(Transaction.created_at.asc()).all()
+        valid_transactions = [row for row in transactions if row.created_at and int(row.quantity or 0) > 0]
+        if not valid_transactions:
+            return {
+                "sufficient_history": False,
+                "months_available": 0,
+                "history_start": None,
+                "history_end": None,
+                "top_seasonal_medicines": [],
+                "upcoming_seasonal_demand": [],
+                "medicine_series": [],
+            }
+
+        start = valid_transactions[0].created_at.date()
+        end = valid_transactions[-1].created_at.date()
+        months_available = (end.year - start.year) * 12 + end.month - start.month + 1
+        years_count = max(1, (end.year - start.year) + 1)
+        month_labels = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+
+        grouped = {}
+        for row in valid_transactions:
+            key = int(row.medicine_id)
+            item = grouped.setdefault(key, {
+                "medicine_id": key,
+                "medicine_name": row.medicine_name,
+                "total_units": 0,
+                "by_month": [0] * 12,
+                "by_year_month": {},
+            })
+            quantity = int(row.quantity or 0)
+            item["total_units"] += quantity
+            item["by_month"][row.created_at.month - 1] += quantity
+            year_month = (row.created_at.year, row.created_at.month)
+            item["by_year_month"][year_month] = item["by_year_month"].get(year_month, 0) + quantity
+
+        medicine_ids = list(grouped)
+        stock_rows = db.query(Medicine).filter(Medicine.id.in_(medicine_ids)).all() if medicine_ids else []
+        stock_map = {medicine.id: medicine for medicine in stock_rows}
+
+        candidates = []
+        series = []
+        for item in grouped.values():
+            monthly_average = [round(units / years_count, 2) for units in item["by_month"]]
+            peak_index = max(range(12), key=lambda index: monthly_average[index])
+            peak_average = monthly_average[peak_index]
+            baseline_values = [value for index, value in enumerate(monthly_average) if index != peak_index]
+            baseline_average = sum(baseline_values) / len(baseline_values) if baseline_values else 0
+            lift_percent = round(((peak_average - baseline_average) / baseline_average) * 100, 1) if baseline_average > 0 else (100.0 if peak_average > 0 else 0.0)
+            peak_years = sum(
+                1 for year in range(start.year, end.year + 1)
+                if item["by_year_month"].get((year, peak_index + 1), 0) > 0
+            )
+            recurring = months_available >= 12 and peak_years >= 2 and peak_average > baseline_average * 1.2
+            status = "High" if lift_percent >= 50 else "Moderate" if lift_percent >= 25 else "Increasing"
+            medicine = stock_map.get(item["medicine_id"])
+            stock = int(medicine.stock or 0) if medicine else 0
+            reorder_level = int(medicine.reorder_level or 0) if medicine else 0
+            record = {
+                "medicine_id": item["medicine_id"],
+                "medicine_name": item["medicine_name"],
+                "peak_month": peak_index + 1,
+                "peak_month_label": month_labels[peak_index],
+                "peak_average_units": round(peak_average, 2),
+                "peak_total_units": item["by_month"][peak_index],
+                "average_monthly_sales": round(item["total_units"] / months_available, 2),
+                "demand_increase_percent": lift_percent,
+                "demand_status": status,
+                "recurring_peak_years": peak_years,
+                "current_stock": stock,
+                "reorder_level": reorder_level,
+                "monthly_sales": [
+                    {"month": index + 1, "label": month_labels[index], "units": item["by_month"][index], "average_units": monthly_average[index]}
+                    for index in range(12)
+                ],
+            }
+            series.append(record)
+            if recurring:
+                candidates.append(record)
+
+        candidates.sort(key=lambda row: (row["demand_increase_percent"], row["peak_average_units"]), reverse=True)
+        current_month = date.today().month
+        upcoming = []
+        for record in candidates:
+            months_until_peak = (record["peak_month"] - current_month) % 12
+            if months_until_peak not in (1, 2, 3):
+                continue
+            target_stock = max(record["peak_average_units"], record["reorder_level"])
+            recommended = max(0, math.ceil(target_stock - record["current_stock"]))
+            upcoming.append({
+                **record,
+                "months_until_peak": months_until_peak,
+                "forecast_demand": round(record["peak_average_units"], 2),
+                "recommended_additional_quantity": recommended,
+                "reorder_status": "Restock recommended" if recommended > 0 else "Stock adequate",
+                "calculation_explanation": f"max(peak average {record['peak_average_units']:.2f}, reorder level {record['reorder_level']}) - current stock {record['current_stock']}",
+            })
+
+        return {
+            "sufficient_history": months_available >= 12,
+            "months_available": months_available,
+            "history_start": start.isoformat(),
+            "history_end": end.isoformat(),
+            "top_seasonal_medicines": candidates[:20],
+            "upcoming_seasonal_demand": upcoming[:20],
+            "medicine_series": sorted(series, key=lambda row: row["total_units"], reverse=True)[:100],
+        }
     finally:
         db.close()
 
