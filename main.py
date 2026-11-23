@@ -2110,10 +2110,17 @@ def get_inventory_alert_config(db: Session, dosage_form: Optional[str]):
     normalized = (dosage_form or '').strip()
     if not normalized:
         return None
-    return db.query(InventoryAlertConfig).filter(
-        InventoryAlertConfig.dosage_form.ilike(normalized),
-        InventoryAlertConfig.is_active.is_(True),
-    ).first()
+    try:
+        return db.query(InventoryAlertConfig).filter(
+            InventoryAlertConfig.dosage_form.ilike(normalized),
+            InventoryAlertConfig.is_active.is_(True),
+        ).first()
+    except SQLAlchemyError as exc:
+        # Older production databases may not have the optional alert-config
+        # table yet. Dashboard totals should still work with the defaults.
+        db.rollback()
+        print(f"[WARN] Inventory alert config unavailable; using defaults: {exc}")
+        return None
 
 
 def get_effective_low_stock_threshold(db: Session, medicine: Medicine) -> int:
@@ -4177,7 +4184,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "medicine_name": act.medicine_name,
                 "performed_by": act.performed_by,
                 "role": act.role,
-                "timestamp": act.timestamp.isoformat(),
+                "timestamp": act.timestamp.isoformat() if act.timestamp else "",
                 "old_value": act.old_value,
                 "new_value": act.new_value
             })
@@ -4195,7 +4202,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "action": mv.type,
                 "medicine_name": med_name,
                 "quantity": mv.quantity,
-                "timestamp": mv.created_at.isoformat()
+                "timestamp": mv.created_at.isoformat() if mv.created_at else ""
             })
 
         sales_query = db.query(SalesTransaction).join(Medicine, Medicine.id == SalesTransaction.medicine_id)
@@ -4223,7 +4230,7 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "action": "SALE",
                 "medicine_name": med_name,
                 "quantity": s.quantity,
-                "timestamp": s.transaction_date.isoformat(),
+                "timestamp": s.transaction_date.isoformat() if s.transaction_date else "",
                 "total": s.total
             })
 
@@ -4301,6 +4308,9 @@ def get_admin_dashboard_stats(db: Session = Depends(get_db), current_user: User 
             "all_medicines_with_meta": all_medicines_with_meta
         }
     except Exception as exc:
+        print(f"[ERROR] Failed to fetch admin stats: {exc}", flush=True)
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to fetch admin stats: {str(exc)}")
 
 @app.get("/admin/alerts")
